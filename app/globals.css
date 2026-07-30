@@ -1,0 +1,136 @@
+@import "tailwindcss";
+
+:root {
+  --background: #08090b;
+  --surface: #0f1115;
+  --surface-container-lowest: #050607;
+  --surface-container-low: #13151b;
+  --surface-container: #1b1e25;
+  --surface-container-high: #242933;
+  --surface-container-highest: #303745;
+  --surface-variant: #1b1e25;
+  --on-background: #f8fafc;
+  --on-surface: #f8fafc;
+  --on-surface-variant: #94a3b8;
+  --outline: #242933;
+  --outline-variant: #13151b;
+  --primary: #a3e635;
+  --on-primary: #08090b;
+  --primary-container: #1b2e0c;
+  --on-primary-container: #d9f99d;
+  --secondary: #a3e635;
+  --on-secondary: #08090b;
+  --secondary-container: #1b2e0c;
+  --on-secondary-container: #d9f99d;
+  --error: #ef4444;
+  --on-error: #ffffff;
+  --error-container: #450a0a;
+  --on-error-container: #fca5a5;
+  --inverse-surface: #f8fafc;
+  --inverse-on-surface: #08090b;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-surface: var(--surface);
+  --color-surface-container-lowest: var(--surface-container-lowest);
+  --color-surface-container-low: var(--surface-container-low);
+  --color-surface-container: var(--surface-container);
+  --color-surface-container-high: var(--surface-container-high);
+  --color-surface-container-highest: var(--surface-container-highest);
+  --color-surface-variant: var(--surface-variant);
+  --color-on-background: var(--on-background);
+  --color-on-surface: var(--on-surface);
+  --color-on-surface-variant: var(--on-surface-variant);
+  --color-outline: var(--outline);
+  --color-outline-variant: var(--outline-variant);
+  --color-primary: var(--primary);
+  --color-on-primary: var(--on-primary);
+  --color-primary-container: var(--primary-container);
+  --color-on-primary-container: var(--on-primary-container);
+  --color-secondary: var(--secondary);
+  --color-on-secondary: var(--on-secondary);
+  --color-secondary-container: var(--secondary-container);
+  --color-on-secondary-container: var(--on-secondary-container);
+  --color-error: var(--error);
+  --color-on-error: var(--on-error);
+  --color-error-container: var(--error-container);
+  --color-on-error-container: var(--on-error-container);
+  --color-inverse-surface: var(--inverse-surface);
+  --color-inverse-on-surface: var(--inverse-on-surface);
+
+  --font-sans: var(--font-inter);
+  --font-mono: var(--font-jetbrains-mono);
+
+  --spacing-xs: 4px;
+  --spacing-sm: 8px;
+  --spacing-md: 16px;
+  --spacing-lg: 24px;
+  --spacing-xl: 48px;
+
+  --text-display-lg: 48px;
+  --text-display-lg--line-height: 60px;
+  --text-display-lg--letter-spacing: -0.02em;
+  --text-display-lg--font-weight: 700;
+  --text-headline-lg: 32px;
+  --text-headline-lg--line-height: 40px;
+  --text-headline-lg--letter-spacing: -0.01em;
+  --text-headline-lg--font-weight: 600;
+  --text-headline-md: 24px;
+  --text-headline-md--line-height: 32px;
+  --text-headline-md--font-weight: 600;
+  --text-body-lg: 18px;
+  --text-body-lg--line-height: 28px;
+  --text-body-md: 16px;
+  --text-body-md--line-height: 24px;
+  --text-body-sm: 14px;
+  --text-body-sm--line-height: 20px;
+  --text-label-md: 14px;
+  --text-label-md--line-height: 20px;
+  --text-label-md--font-weight: 600;
+  --text-mono-data: 13px;
+  --text-mono-data--line-height: 18px;
+}
+
+.material-symbols-outlined {
+  font-variation-settings:
+    "FILL" 0,
+    "wght" 400,
+    "GRAD" 0,
+    "opsz" 24;
+  display: inline-block;
+  vertical-align: middle;
+  line-height: 1;
+}
+
+body {
+  background: var(--background);
+  color: var(--on-background);
+}
+
+/* Custom Signal Path & Rail Utilities */
+@keyframes dash {
+  to {
+    stroke-dashoffset: -40;
+  }
+}
+
+.animate-signal-flow {
+  stroke-dasharray: 8 12;
+  animation: dash 2s linear infinite;
+}
+
+@keyframes pulse-glow {
+  0%, 100% {
+    box-shadow: 0 0 6px rgba(163, 230, 53, 0.2);
+    border-color: rgba(163, 230, 53, 0.3);
+  }
+  50% {
+    box-shadow: 0 0 18px rgba(163, 230, 53, 0.6);
+    border-color: rgba(163, 230, 53, 0.8);
+  }
+}
+
+.pulse-glow-border {
+  animation: pulse-glow 3s infinite ease-in-out;
+}
