@@ -5,12 +5,20 @@ const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 const MODEL = "llama-3.1-8b-instant";
 const BATCH_SIZE = 8;
 
-// CAN-SPAM requires a clear opt-out mechanism and a valid postal address on
-// every commercial email — appended here so it's guaranteed present regardless
-// of whether Groq or the fallback template produced the body.
-function complianceFooter(config: OutreachConfig): string {
-  if (!config.businessAddress) return "";
-  return `\n\nIf you'd rather not hear from us again, just reply and let us know.\n${config.businessAddress}`;
+function formatHookLines(hook: string): string | null {
+  const lines = hook.split("\n").map((line) => line.trim()).filter(Boolean);
+  if (lines.length >= 2) {
+    return `${lines[0]}\n${lines.slice(1).join(" ")}`;
+  }
+  if (lines.length === 1) {
+    const match = lines[0].match(/^([\s\S]*?[.!?])\s+([\s\S]*)$/);
+    if (match) {
+      const line1 = match[1].trim();
+      const line2 = match[2].trim();
+      if (line1 && line2) return `${line1}\n${line2}`;
+    }
+  }
+  return null;
 }
 
 function buildEleviqueBody(
@@ -21,33 +29,33 @@ function buildEleviqueBody(
   const nameGreeting = pocName ? pocName : "there";
   const proofLine = config.proofPoints
     ? (config.proofPoints.startsWith("http") || config.proofPoints.startsWith("www")
-        ? `A few recent projects are here: ${config.proofPoints}`
+        ? `A few recent projects are here:\n${config.proofPoints}`
         : config.proofPoints)
-    : "A few recent projects are here: www.elevique.in/portfolio";
+    : "A few recent projects are here:\nwww.elevique.in/portfolio";
 
   const ctaText =
     config.cta ||
-    "If you feel it's worth a 15-minute walkthrough, please confirm your availability for a Google Meet or phone call this week. Alternatively, if someone on your team handles content and ads marketing, happy to take it up with them – just point me their way.";
+    "If you feel it's worth a 15-minute walkthrough, please confirm your availability for a Google Meet or phone call this week. Alternatively, if someone else on your team handles content, advertising or marketing, we'd be happy to take it up with them—just point us in the right direction.";
 
   const pitchText =
     config.pitch ||
-    "Elevique produces brand films and social content for companies like yours, using AI-native production. And because we think like marketers, not just filmmakers, the work is built to perform, not just to look good.";
+    "Elevique creates and manages brand films, social media content and campaigns for brands like yours using AI-native production.\n\nThe best part?\nIt's not like generic AI visuals but concepts that actually perform.";
 
   return `Hi ${nameGreeting},
 
 ${openingHook}
-${pitchText}
 
+${pitchText}
 ${proofLine}
 
 ${ctaText}
 
-${config.signature}${complianceFooter(config)}`;
+${config.signature}`;
 }
 
 function fallbackDraft(contact: EmailResult, config: OutreachConfig): DraftResult {
   const brandName = contact.brand || "your team";
-  const openingHook = `${brandName} frequent collection drops demand a constant flow of premium campaign creatives something traditional shoots often struggle to scale.`;
+  const openingHook = `Just wanted to check how is your content currently performing for the brand?\nWe've been following ${brandName}'s work in the ${contact.category || "content"} space, and we'd love to explore creating cinematic AI visuals that help its campaigns stand out.`;
 
   return {
     email: contact.email,
@@ -63,15 +71,36 @@ async function callGroq(
   config: OutreachConfig,
   apiKey: string
 ): Promise<DraftResult[]> {
-  const prompt = `You are writing tailored cold outreach opening hooks on behalf of ${config.senderName} at ${config.company}.
+  const prompt = `You are writing tailored cold outreach opening hooks on behalf of ${config.senderName} at ${config.company}, which creates and manages brand films, social media content and campaigns using AI-native production.
 
 For each contact below, write:
 1. A concise personalized subject line matching this exact format: "Noticed something about {Brand}'s content ↗"
-2. A single opening hook sentence (under 30 words) that connects the recipient brand ({Brand}) and category ({Category}) to their constant demand for premium campaign creatives and the challenge of scaling traditional shoots.
+2. A short 2-line opening hook. Pick ONE of these 4 approved hook structures per contact, and lightly reword it so it reads naturally for that specific brand — you may adjust the wording, but keep the same 2-line structure, meaning, and approximate length as the version you pick:
 
-DO NOT write the full body, call to action, signature, or links. Only generate the subject and opening hook.
+Version 1:
+Line 1: "Just wanted to check how is your content currently performing for the brand?"
+Line 2: "We've been following {Brand}'s work in {category/space}, and we'd love to explore creating cinematic AI visuals that help its campaigns stand out."
 
-Respond ONLY with JSON of the form {"drafts":[{"email":"...","subject":"...","openingHook":"..."}]}, one entry per contact below, same order.
+Version 2:
+Line 1: "Does your current content fully reflect the kind of brand you're building?"
+Line 2: "We came across {Brand}'s recent work around {category/space}, and saw strong potential to extend it through more cinematic and distinctive visual storytelling."
+
+Version 3:
+Line 1: "Is your content only looking good, or is it also helping the brand get noticed?"
+Line 2: "{Brand} already has a strong presence in {category/space}, and we'd love to explore AI-led campaign visuals that can make its communication more memorable and effective."
+
+Version 4:
+Line 1: "Your brand may already have the right story—the content can take it much further."
+Line 2: "We've been following {Brand}'s work in {category/space}, and believe its identity could translate beautifully into cinematic AI films and campaign-led social content."
+
+Rules for picking and filling in the hook:
+   - Rotate across the contacts in this batch so you use a mix of all 4 versions — do not use the same version for two contacts in a row, and spread all 4 roughly evenly across the batch.
+   - Replace {Brand} with the contact's actual brand name, and replace {category/space} with something grounded in the contact's actual Category field (e.g. "the music space", "the VFX industry") — do NOT invent a specific named project, campaign, artist, or collaboration you can't verify; stay general about the specific work being referenced.
+   - Keep each hook to exactly 2 lines, matching the structure of the version you picked.
+
+DO NOT write the full pitch, proof points, call to action, signature, or links. Only generate the subject and the 2-line hook described above.
+
+Respond ONLY with JSON of the form {"drafts":[{"email":"...","subject":"...","openingHook":"..."}]}, one entry per contact below, same order. The "openingHook" field should contain the 2-line hook as a single string, with a newline character between line 1 and line 2.
 
 Contacts:
 ${batch
@@ -87,7 +116,7 @@ ${batch
       {
         model: MODEL,
         messages: [{ role: "user", content: prompt }],
-        temperature: 0.6,
+        temperature: 0.85,
         response_format: { type: "json_object" },
       },
       {
@@ -116,15 +145,16 @@ ${batch
     return batch.map((c) => {
       const match = byEmail.get(c.email.toLowerCase());
       const brandName = c.brand || "your team";
-      const defaultHook = `${brandName} frequent collection drops demand a constant flow of premium campaign creatives something traditional shoots often struggle to scale.`;
-      const hook = match?.openingHook || match?.body || defaultHook;
-      const subject = match?.subject || `Noticed something about ${brandName}'s content ↗`;
+      const defaultHook = `Just wanted to check how is your content currently performing for the brand?\nWe've been following ${brandName}'s work in the ${c.category || "content"} space, and we'd love to explore creating cinematic AI visuals that help its campaigns stand out.`;
+      const rawHook = match?.openingHook || match?.body || defaultHook;
+      const hook = formatHookLines(rawHook) ?? defaultHook;
+      const subject = `Noticed something about ${brandName}'s content ↗`;
 
       return {
         email: c.email,
         pocName: c.pocName,
         brand: c.brand,
-        subject: subject,
+        subject,
         body: buildEleviqueBody(c.pocName, hook, config),
       };
     });

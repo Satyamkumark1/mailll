@@ -38,12 +38,12 @@ export interface OutreachConfig {
 }
 
 export const ELEVIQUE_OUTREACH_CONFIG: OutreachConfig = {
-  senderName: "Akshita Verma",
+  senderName: "Manish Mishra",
   company: "Elevique Creations",
-  pitch: "Elevique produces brand films and social content for companies like yours, using AI-native production. And because we think like marketers, not just filmmakers, the work is built to perform, not just to look good.",
+  pitch: "Elevique creates and manages brand films, social media content and campaigns for brands like yours using AI-native production.\n\nThe best part?\nIt's not like generic AI visuals but concepts that actually perform.",
   proofPoints: "www.elevique.in/portfolio",
-  cta: "If you feel it's worth a 15-minute walkthrough, please confirm your availability for a Google Meet or phone call this week. Alternatively, if someone on your team handles content and ads marketing, happy to take it up with them – just point me their way.",
-  signature: "Thanks & Regards,\nAkshita Verma\nElevique Creations\nPh: +91-7217832613",
+  cta: "If you feel it's worth a 15-minute walkthrough, please confirm your availability for a Google Meet or phone call this week. Alternatively, if someone else on your team handles content, advertising or marketing, we'd be happy to take it up with them—just point us in the right direction.",
+  signature: "Regards,\nManish Mishra\nFounder, Elevique Creations",
   businessAddress: "Elevique Creations, India",
   tone: "casual",
 };
