@@ -1328,7 +1328,7 @@ export default function Home() {
 
                       {pendingDraftAction && (
                         <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/75 p-md backdrop-blur-sm" role="presentation">
-                          <div role="dialog" aria-modal="true" aria-labelledby="unsaved-draft-title" className="w-full max-w-md rounded-2xl border border-outline bg-surface p-lg shadow-2xl">
+                          <div role="dialog" aria-modal="true" aria-labelledby="unsaved-draft-title" className="w-full max-w-[28rem] rounded-2xl border border-outline bg-surface p-lg shadow-2xl">
                             <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-amber-500/30 bg-amber-500/10 text-amber-400">
                               <Icon name="edit_note" className="text-[21px]" />
                             </div>
@@ -1477,7 +1477,7 @@ export default function Home() {
                           <Icon name="ios_share" className="text-[32px] font-bold" />
                         </div>
                         <h3 className="text-headline-md font-bold text-on-surface">Download CSV Datasets</h3>
-                        <p className="text-body-sm text-on-surface-variant max-w-sm">
+                        <p className="text-body-sm text-on-surface-variant max-w-[24rem]">
                           Download full validation listings or clean-only verified contacts directly to your local file system.
                         </p>
                         <div className="flex flex-col gap-md sm:flex-row mt-sm">
