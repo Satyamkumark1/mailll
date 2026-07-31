@@ -88,6 +88,7 @@ interface ValidatorState {
   appendDrafts: (batch: DraftResult[]) => void;
   setDraftError: (msg: string | null) => void;
   clearDrafts: () => void;
+  updateDraft: (email: string, patch: Partial<Pick<DraftResult, "subject" | "body">>) => void;
   setSending: (v: boolean) => void;
   setSendProgress: (done: number, total: number) => void;
   appendSendResults: (batch: SendResult[]) => void;
@@ -128,6 +129,10 @@ export const useValidatorStore = create<ValidatorState>((set) => ({
   appendDrafts: (batch) => set((s) => ({ drafts: [...s.drafts, ...batch] })),
   setDraftError: (msg) => set({ draftError: msg }),
   clearDrafts: () => set({ drafts: [], draftProgress: { done: 0, total: 0 }, draftError: null }),
+  updateDraft: (email, patch) =>
+    set((s) => ({
+      drafts: s.drafts.map((d) => (d.email === email ? { ...d, ...patch } : d)),
+    })),
   setSending: (v) => set({ isSending: v }),
   setSendProgress: (done, total) => set({ sendProgress: { done, total } }),
   appendSendResults: (batch) => set((s) => ({ sendResults: [...s.sendResults, ...batch] })),

@@ -679,7 +679,7 @@ export default function Landing() {
             <span className="text-[10px] font-bold uppercase tracking-wider text-primary">Compare</span>
             <h2 className="text-headline-lg font-bold tracking-tight text-on-surface">How we differ</h2>
             <p className="mx-auto max-w-2xl text-body-md text-on-surface-variant">
-              Compared by capability — dedicated validators and mass-mailing tools aren't built for this unified flow.
+              Compared by capability — dedicated validators and mass-mailing tools aren&apos;t built for this unified flow.
             </p>
           </div>
 
