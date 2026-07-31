@@ -18,7 +18,7 @@ import {
   type Tone,
 } from "@/lib/store";
 import { TABS } from "@/lib/tabs";
-import { cn, downloadCsv, draftsToCsv, parseEmailCsv, resultsToCsv, type ParsedCsv } from "@/lib/utils";
+import { cn, computeDraftsStale, downloadCsv, draftsToCsv, parseEmailCsv, resultsToCsv, type ParsedCsv } from "@/lib/utils";
 
 const TONES: Tone[] = ["casual", "formal", "in-between"];
 
@@ -45,7 +45,7 @@ export default function Home() {
     activeTab, emails, results, isValidating, progress, error,
     drafts, isDrafting, draftProgress, draftError, outreachConfig,
     sendResults, isSending, sendProgress,
-    setActiveTab, setEmails, setValidating, setProgress, appendResults, markResultValid, setError, reset,
+    setActiveTab, setEmails, setValidating, setProgress, appendResults, markResultValid, markAllFlaggedValid, setError, reset,
     setOutreachConfig, setDrafting, setDraftProgress, appendDrafts, setDraftError, clearDrafts, updateDraft,
     setSending, setSendProgress, appendSendResults, clearSendResults,
   } = store;
@@ -88,6 +88,7 @@ export default function Home() {
   }, [results, filter, resultsSearch]);
 
   const validContacts = useMemo(() => results.filter((r) => r.status === "valid"), [results]);
+  const draftsStale = useMemo(() => computeDraftsStale(validContacts, drafts), [validContacts, drafts]);
   const selectedDraft = useMemo(
     () => drafts.find((draft) => draft.email === selectedDraftEmail) ?? null,
     [drafts, selectedDraftEmail]
@@ -317,7 +318,7 @@ export default function Home() {
     if (tab === "upload") return true;
     if (tab === "validate") return emails.length > 0;
     if (tab === "draft") return validContacts.length > 0;
-    if (tab === "send") return drafts.length > 0;
+    if (tab === "send") return drafts.length > 0 && !draftsStale;
     return results.length > 0;
   };
 
@@ -907,6 +908,16 @@ export default function Home() {
                             <Icon name="download" className="text-[18px]" />
                             CSV
                           </button>
+                          {summary.flagged > 0 && (
+                            <button
+                              onClick={markAllFlaggedValid}
+                              title="Manually mark every flagged email as valid based on your checks"
+                              className="flex items-center gap-sm rounded-lg border border-amber-400/30 bg-amber-400/10 px-md py-sm text-label-md font-bold text-amber-400 hover:bg-amber-400/20 transition-colors cursor-pointer shadow-sm whitespace-nowrap"
+                            >
+                              <Icon name="check_circle" className="text-[18px]" />
+                              Mark All Flagged Valid
+                            </button>
+                          )}
                           {validContacts.length > 0 && (
                             <button
                               onClick={() => setActiveTab("draft")}
@@ -1140,8 +1151,8 @@ export default function Home() {
                                 </button>
                                 <button
                                   onClick={() => requestTabChange("send")}
-                                  disabled={isSending}
-                                  title="Go to the Send stage"
+                                  disabled={isSending || draftsStale}
+                                  title={draftsStale ? "Regenerate drafts to include newly-approved contacts before sending" : "Go to the Send stage"}
                                   className="flex items-center gap-xs rounded-lg border border-primary bg-primary/10 px-md py-sm text-label-md font-extrabold text-primary transition-colors hover:bg-primary/20 disabled:cursor-not-allowed disabled:opacity-45 focus:outline-none focus:ring-2 focus:ring-primary/30"
                                 >
                                   <Icon name="send" className="text-[16px]" />
@@ -1162,14 +1173,26 @@ export default function Home() {
                           </div>
 
                           {drafts.length > 0 && (
-                            <div className="flex flex-col gap-md rounded-2xl border border-primary/25 bg-primary/5 p-md shadow-sm sm:flex-row sm:items-center sm:justify-between">
+                            <div className={cn(
+                              "flex flex-col gap-md rounded-2xl border p-md shadow-sm sm:flex-row sm:items-center sm:justify-between",
+                              draftsStale ? "border-amber-500/30 bg-amber-500/10" : "border-primary/25 bg-primary/5"
+                            )}>
                               <div className="flex items-start gap-sm">
-                                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-primary text-on-primary shadow-sm">
-                                  <Icon name="mark_email_read" className="text-[21px]" />
+                                <div className={cn(
+                                  "flex h-10 w-10 shrink-0 items-center justify-center rounded-xl shadow-sm",
+                                  draftsStale ? "bg-amber-500 text-on-primary" : "bg-primary text-on-primary"
+                                )}>
+                                  <Icon name={draftsStale ? "sync_problem" : "mark_email_read"} className="text-[21px]" />
                                 </div>
                                 <div>
                                   <p className="text-body-md font-bold text-on-surface">{drafts.length} draft{drafts.length === 1 ? "" : "s"} ready to review</p>
-                                  <p className="text-body-sm text-on-surface-variant">Open the full-page editor to review, refine, and save each email.</p>
+                                  {draftsStale ? (
+                                    <p className="text-body-sm text-amber-400 font-semibold">
+                                      Contacts were approved after these drafts were generated. Regenerate to include them — sending is locked until you do.
+                                    </p>
+                                  ) : (
+                                    <p className="text-body-sm text-on-surface-variant">Open the full-page editor to review, refine, and save each email.</p>
+                                  )}
                                 </div>
                               </div>
                               <div className="flex flex-wrap gap-sm">
@@ -1189,7 +1212,9 @@ export default function Home() {
                                 </button>
                                 <button
                                   onClick={() => requestTabChange("send")}
-                                  className="flex items-center gap-xs rounded-lg border border-primary bg-primary/10 px-md py-sm text-label-md font-extrabold text-primary transition-colors hover:bg-primary/20 focus:outline-none focus:ring-2 focus:ring-primary/30"
+                                  disabled={draftsStale}
+                                  title={draftsStale ? "Regenerate drafts to include newly-approved contacts before sending" : "Go to the Send stage"}
+                                  className="flex items-center gap-xs rounded-lg border border-primary bg-primary/10 px-md py-sm text-label-md font-extrabold text-primary transition-colors hover:bg-primary/20 disabled:cursor-not-allowed disabled:opacity-45 focus:outline-none focus:ring-2 focus:ring-primary/30"
                                 >
                                   <Icon name="send" className="text-[16px]" />
                                   Ready to send
@@ -1295,6 +1320,7 @@ export default function Home() {
                               )}
                               {!configComplete && !isDrafting && <p className="mt-2 text-xs font-mono text-on-surface-variant">* All form details must be provided to run draft generation.</p>}
                               {isSending && <p className="mt-2 text-xs font-mono text-on-surface-variant">* Regeneration is disabled while a sending run is active.</p>}
+                              {draftsStale && !isSending && <p className="mt-2 text-xs font-mono text-amber-400 font-semibold">* Contacts were approved after these drafts were generated — regenerate to include them before sending.</p>}
                             </div>
                           </div>
                         </>
@@ -1329,6 +1355,13 @@ export default function Home() {
                           Send AI-composed outreach paced randomly to mimic human activity and protect sender reputation.
                         </p>
                       </div>
+
+                      {draftsStale && (
+                        <div className="flex items-start gap-sm rounded-xl border border-amber-500/25 bg-amber-500/10 px-md py-sm text-body-sm text-amber-200">
+                          <Icon name="sync_problem" className="mt-0.5 text-[18px] text-amber-400" />
+                          <span>Contacts were approved after these drafts were generated. Regenerate drafts before sending to include them.</span>
+                        </div>
+                      )}
 
                       <div className="rounded-xl border border-outline bg-surface p-lg shadow-sm space-y-md">
                         <p className="flex items-center gap-sm text-body-sm text-on-surface-variant font-semibold">
@@ -1380,7 +1413,8 @@ export default function Home() {
                         <div className="mt-lg flex gap-md">
                           <button
                             onClick={startSend}
-                            disabled={isSending || drafts.length === 0}
+                            disabled={isSending || drafts.length === 0 || draftsStale}
+                            title={draftsStale ? "Regenerate drafts to include newly-approved contacts before sending" : undefined}
                             className="flex items-center gap-sm rounded-lg bg-primary px-lg py-md text-label-md font-extrabold text-on-primary shadow-lg shadow-primary/20 transition-all hover:scale-[1.02] active:scale-95 disabled:opacity-50 cursor-pointer"
                           >
                             <Icon name="send" className="text-[18px]" />

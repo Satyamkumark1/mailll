@@ -81,6 +81,7 @@ interface ValidatorState {
   setProgress: (done: number, total: number) => void;
   appendResults: (batch: EmailResult[]) => void;
   markResultValid: (email: string) => void;
+  markAllFlaggedValid: () => void;
   setError: (msg: string | null) => void;
   setOutreachConfig: (config: OutreachConfig) => void;
   setDrafting: (v: boolean) => void;
@@ -120,6 +121,12 @@ export const useValidatorStore = create<ValidatorState>((set) => ({
     set((s) => ({
       results: s.results.map((r) =>
         r.email === email ? { ...r, status: "valid", reason: "Manually verified by user" } : r
+      ),
+    })),
+  markAllFlaggedValid: () =>
+    set((s) => ({
+      results: s.results.map((r) =>
+        r.status === "flagged" ? { ...r, status: "valid", reason: "Manually verified by user" } : r
       ),
     })),
   setError: (msg) => set({ error: msg }),
