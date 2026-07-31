@@ -74,7 +74,7 @@ async function callGroq(
   const prompt = `You are writing tailored cold outreach opening hooks on behalf of ${config.senderName} at ${config.company}, which creates and manages brand films, social media content and campaigns using AI-native production.
 
 For each contact below, write:
-1. A concise personalized subject line matching this exact format: "Noticed something about {Brand}'s content ↗"
+1. A concise personalized subject line matching this exact format: "Noticed something about {Brand}'s content "
 2. A short 2-line opening hook. Pick ONE of these 4 approved hook structures per contact, and lightly reword it so it reads naturally for that specific brand — you may adjust the wording, but keep the same 2-line structure, meaning, and approximate length as the version you pick:
 
 Version 1:
