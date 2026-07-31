@@ -253,7 +253,10 @@ export default function Home() {
   const resolvePendingDraftAction = useCallback(
     (resolution: "save" | "discard") => {
       if (!pendingDraftAction) return;
-      if (resolution === "save" && !saveDraftChanges()) return;
+      if (resolution === "save" && !saveDraftChanges()) {
+        setPendingDraftAction(null);
+        return;
+      }
       if (resolution === "discard") discardDraftChanges();
       const action = pendingDraftAction.run;
       setPendingDraftAction(null);
