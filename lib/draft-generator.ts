@@ -26,7 +26,7 @@ function buildEleviqueBody(
   openingHook: string,
   config: OutreachConfig
 ): string {
-  const nameGreeting = pocName ? pocName : "there";
+  const nameGreeting = pocName.trim().split(/\s+/)[0] || "there";
   const proofLine = config.proofPoints
     ? (config.proofPoints.startsWith("http") || config.proofPoints.startsWith("www")
         ? `A few recent projects are here:\n${config.proofPoints}`

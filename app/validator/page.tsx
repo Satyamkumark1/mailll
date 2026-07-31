@@ -6,6 +6,7 @@ import { Icon } from "@/components/icon";
 import { Logo } from "@/components/logo";
 import { generateDrafts } from "@/lib/draft-generator";
 import { sendDraftsPaced } from "@/lib/email-sender";
+import { buildSignatureHtml } from "@/lib/email-signature";
 import { validateEmails } from "@/lib/groq-validator";
 import {
   ELEVIQUE_OUTREACH_CONFIG,
@@ -94,6 +95,10 @@ export default function Home() {
     [drafts, selectedDraftEmail]
   );
   const selectedDraftIndex = selectedDraft ? drafts.findIndex((draft) => draft.email === selectedDraft.email) : -1;
+  const signatureHtml = useMemo(
+    () => buildSignatureHtml(outreachConfig, "/elevique-logo.png"),
+    [outreachConfig]
+  );
   const isDraftDirty = Boolean(
     selectedDraft && (editorSubject !== selectedDraft.subject || editorBody !== selectedDraft.body)
   );
@@ -277,7 +282,11 @@ export default function Home() {
     outreachConfig.pitch.trim() &&
     outreachConfig.cta.trim() &&
     outreachConfig.signature.trim() &&
-    outreachConfig.businessAddress.trim();
+    outreachConfig.businessAddress.trim() &&
+    outreachConfig.title.trim() &&
+    outreachConfig.mobile.trim() &&
+    outreachConfig.contactEmail.trim() &&
+    outreachConfig.website.trim();
 
   const startSend = useCallback(async () => {
     const { minSec, maxSec } = PACING_PRESETS[pacing];
@@ -300,6 +309,7 @@ export default function Home() {
 
     await sendDraftsPaced(
       drafts,
+      outreachConfig,
       minSec * 1000,
       maxSec * 1000,
       (done, total) => setSendProgress(done, total),
@@ -308,7 +318,7 @@ export default function Home() {
     );
 
     setSending(false);
-  }, [drafts, pacing, setSending, setSendProgress, appendSendResults, clearSendResults]);
+  }, [drafts, outreachConfig, pacing, setSending, setSendProgress, appendSendResults, clearSendResults]);
 
   const stopSend = useCallback(() => {
     cancelSendRef.current = true;
@@ -1108,6 +1118,14 @@ export default function Home() {
                                   rows={18}
                                   className="min-h-[360px] w-full resize-y rounded-xl border border-outline bg-surface-container-low px-md py-md font-sans text-body-md leading-relaxed text-on-surface outline-none transition-colors placeholder:text-on-surface-variant/60 focus:border-primary focus:ring-2 focus:ring-primary/20 disabled:cursor-not-allowed disabled:opacity-60"
                                 />
+                                <p className="text-[11px] text-on-surface-variant">The signature below is appended automatically and isn&apos;t part of this text — edit it in Generation settings.</p>
+                              </div>
+
+                              <div className="space-y-1.5">
+                                <label className="text-[10px] font-bold uppercase tracking-wider text-on-surface-variant">Signature preview (as sent)</label>
+                                <div className="rounded-xl border border-outline bg-white p-lg">
+                                  <div dangerouslySetInnerHTML={{ __html: signatureHtml }} />
+                                </div>
                               </div>
 
                               {editorError && (
@@ -1234,7 +1252,7 @@ export default function Home() {
                                   <span>⚡ Reset to Elevique Template</span>
                                 </button>
                                 <button
-                                  onClick={() => setOutreachConfig({ senderName: "", company: "", pitch: "", cta: "", signature: "", proofPoints: "", businessAddress: "", tone: "casual" })}
+                                  onClick={() => setOutreachConfig({ senderName: "", company: "", pitch: "", cta: "", signature: "", proofPoints: "", businessAddress: "", tone: "casual", title: "", mobile: "", contactEmail: "", website: "" })}
                                   className="cursor-pointer text-xs font-semibold text-on-surface-variant underline decoration-dotted hover:text-primary focus:outline-none focus:ring-2 focus:ring-primary/30"
                                 >
                                   Clear form
@@ -1271,6 +1289,28 @@ export default function Home() {
                               <div className="flex flex-col gap-1">
                                 <label className="text-[10px] font-bold uppercase tracking-wider text-on-surface-variant">Sign-off / Signature</label>
                                 <textarea value={outreachConfig.signature} onChange={(event) => updateConfig({ signature: event.target.value })} placeholder="e.g. Thanks & Regards,&#10;Akshita Verma&#10;Elevique Creations" rows={3} className="rounded-lg border border-outline bg-surface-container-low px-md py-sm font-mono text-xs text-on-surface outline-none focus:border-primary focus:ring-2 focus:ring-primary/20" />
+                              </div>
+                            </div>
+
+                            <div className="grid grid-cols-1 gap-md sm:grid-cols-2">
+                              <div className="flex flex-col gap-1">
+                                <label className="text-[10px] font-bold uppercase tracking-wider text-on-surface-variant">Title / Role</label>
+                                <input value={outreachConfig.title} onChange={(event) => updateConfig({ title: event.target.value })} placeholder="e.g. Founder" className="rounded-lg border border-outline bg-surface-container-low px-md py-sm text-body-sm text-on-surface outline-none focus:border-primary focus:ring-2 focus:ring-primary/20" />
+                              </div>
+                              <div className="flex flex-col gap-1">
+                                <label className="text-[10px] font-bold uppercase tracking-wider text-on-surface-variant">Mobile</label>
+                                <input value={outreachConfig.mobile} onChange={(event) => updateConfig({ mobile: event.target.value })} placeholder="e.g. +91 7217832613" className="rounded-lg border border-outline bg-surface-container-low px-md py-sm text-body-sm text-on-surface outline-none focus:border-primary focus:ring-2 focus:ring-primary/20" />
+                              </div>
+                            </div>
+
+                            <div className="grid grid-cols-1 gap-md sm:grid-cols-2">
+                              <div className="flex flex-col gap-1">
+                                <label className="text-[10px] font-bold uppercase tracking-wider text-on-surface-variant">Contact Email</label>
+                                <input value={outreachConfig.contactEmail} onChange={(event) => updateConfig({ contactEmail: event.target.value })} placeholder="e.g. connect@elevique.in" className="rounded-lg border border-outline bg-surface-container-low px-md py-sm text-body-sm text-on-surface outline-none focus:border-primary focus:ring-2 focus:ring-primary/20" />
+                              </div>
+                              <div className="flex flex-col gap-1">
+                                <label className="text-[10px] font-bold uppercase tracking-wider text-on-surface-variant">Website</label>
+                                <input value={outreachConfig.website} onChange={(event) => updateConfig({ website: event.target.value })} placeholder="e.g. elevique.in" className="rounded-lg border border-outline bg-surface-container-low px-md py-sm text-body-sm text-on-surface outline-none focus:border-primary focus:ring-2 focus:ring-primary/20" />
                               </div>
                             </div>
 

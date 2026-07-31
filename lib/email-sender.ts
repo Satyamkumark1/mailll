@@ -1,11 +1,13 @@
-import type { DraftResult, SendResult } from "./store";
+import { buildEmailHtml, LOGO_CID } from "./email-signature";
+import type { DraftResult, OutreachConfig, SendResult } from "./store";
 
-async function sendOne(draft: DraftResult): Promise<SendResult> {
+async function sendOne(draft: DraftResult, config: OutreachConfig): Promise<SendResult> {
   try {
+    const html = buildEmailHtml(config, draft.body, `cid:${LOGO_CID}`);
     const res = await fetch("/api/send-email", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ to: draft.email, subject: draft.subject, body: draft.body }),
+      body: JSON.stringify({ to: draft.email, subject: draft.subject, body: draft.body, html }),
     });
     const data = await res.json();
     if (!res.ok) {
@@ -31,6 +33,7 @@ function randomDelayMs(min: number, max: number): number {
 // already recorded via onResult.
 export async function sendDraftsPaced(
   drafts: DraftResult[],
+  config: OutreachConfig,
   minDelayMs: number,
   maxDelayMs: number,
   onProgress: (done: number, total: number) => void,
@@ -39,7 +42,7 @@ export async function sendDraftsPaced(
 ): Promise<void> {
   for (let i = 0; i < drafts.length; i++) {
     if (shouldCancel()) return;
-    const result = await sendOne(drafts[i]);
+    const result = await sendOne(drafts[i], config);
     onResult(result);
     onProgress(i + 1, drafts.length);
     if (i < drafts.length - 1 && !shouldCancel()) {
