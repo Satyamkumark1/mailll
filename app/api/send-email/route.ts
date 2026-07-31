@@ -1,7 +1,9 @@
 import nodemailer from "nodemailer";
+import path from "node:path";
+import { LOGO_CID } from "@/lib/email-signature";
 
 export async function POST(request: Request) {
-  const { to, subject, body } = await request.json();
+  const { to, subject, body, html } = await request.json();
   if (!to || !subject || !body) {
     return Response.json({ error: "Missing to/subject/body" }, { status: 400 });
   }
@@ -23,7 +25,24 @@ export async function POST(request: Request) {
   });
 
   try {
-    await transporter.sendMail({ from: user, to, subject, text: body });
+    await transporter.sendMail({
+      from: user,
+      to,
+      subject,
+      text: body,
+      ...(html
+        ? {
+            html,
+            attachments: [
+              {
+                filename: "elevique-logo.png",
+                path: path.join(process.cwd(), "public", "elevique-logo.png"),
+                cid: LOGO_CID,
+              },
+            ],
+          }
+        : {}),
+    });
     return Response.json({ success: true });
   } catch (err) {
     return Response.json(
