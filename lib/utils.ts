@@ -5,6 +5,19 @@ export function cn(...classes: Array<string | false | null | undefined>): string
   return classes.filter(Boolean).join(" ");
 }
 
+// Drafts are generated as a snapshot of the valid-contacts list. Anything that grows
+// that list afterwards (e.g. bulk-approving flagged emails) makes the snapshot stale
+// until the user explicitly regenerates — otherwise newly-valid contacts silently
+// never receive a drafted email even though the Send stage looks "ready".
+export function computeDraftsStale(
+  validContacts: { email: string }[],
+  drafts: { email: string }[]
+): boolean {
+  if (drafts.length === 0) return false;
+  const draftEmails = new Set(drafts.map((d) => d.email));
+  return validContacts.some((contact) => !draftEmails.has(contact.email));
+}
+
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 export function isValidFormat(email: string): boolean {
