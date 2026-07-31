@@ -61,7 +61,7 @@ function fallbackDraft(contact: EmailResult, config: OutreachConfig): DraftResul
     email: contact.email,
     pocName: contact.pocName,
     brand: contact.brand,
-    subject: `Noticed something about ${brandName}'s content ↗`,
+    subject: `Noticed something about ${brandName}'s content`,
     body: buildEleviqueBody(contact.pocName, openingHook, config),
   };
 }
@@ -148,7 +148,7 @@ ${batch
       const defaultHook = `Just wanted to check how is your content currently performing for the brand?\nWe've been following ${brandName}'s work in the ${c.category || "content"} space, and we'd love to explore creating cinematic AI visuals that help its campaigns stand out.`;
       const rawHook = match?.openingHook || match?.body || defaultHook;
       const hook = formatHookLines(rawHook) ?? defaultHook;
-      const subject = `Noticed something about ${brandName}'s content ↗`;
+      const subject = `Noticed something about ${brandName}'s content`;
 
       return {
         email: c.email,
