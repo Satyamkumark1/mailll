@@ -66,6 +66,17 @@ function fallbackDraft(contact: EmailResult, config: OutreachConfig): DraftResul
   };
 }
 
+function manualHookDraft(contact: EmailResult, config: OutreachConfig): DraftResult {
+  const brandName = contact.brand || "your team";
+  return {
+    email: contact.email,
+    pocName: contact.pocName,
+    brand: contact.brand,
+    subject: `Noticed something about ${brandName}'s content`,
+    body: buildEleviqueBody(contact.pocName, config.customHook, config),
+  };
+}
+
 async function callGroq(
   batch: EmailResult[],
   config: OutreachConfig,
@@ -199,6 +210,12 @@ export async function generateDrafts(
   config: OutreachConfig,
   onProgress: (done: number, total: number) => void
 ): Promise<DraftResult[]> {
+  if (config.customHook.trim()) {
+    const drafts = contacts.map((c) => manualHookDraft(c, config));
+    onProgress(contacts.length, contacts.length);
+    return drafts;
+  }
+
   const apiKey = process.env.NEXT_PUBLIC_GROQ_API_KEY;
   if (!apiKey) {
     throw new Error(

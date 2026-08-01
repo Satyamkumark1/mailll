@@ -1,6 +1,7 @@
 import nodemailer from "nodemailer";
 import path from "node:path";
 import { LOGO_CID } from "@/lib/email-signature";
+import { ELEVIQUE_OUTREACH_CONFIG } from "@/lib/store";
 
 export async function POST(request: Request) {
   const { to, subject, body, html } = await request.json();
@@ -26,7 +27,7 @@ export async function POST(request: Request) {
 
   try {
     await transporter.sendMail({
-      from: user,
+      from: `"${ELEVIQUE_OUTREACH_CONFIG.senderName}" <${user}>`,
       to,
       subject,
       text: body,
