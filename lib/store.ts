@@ -39,6 +39,7 @@ export interface OutreachConfig {
   mobile: string;
   contactEmail: string;
   website: string;
+  customHook: string;
 }
 
 export const ELEVIQUE_OUTREACH_CONFIG: OutreachConfig = {
@@ -54,6 +55,7 @@ export const ELEVIQUE_OUTREACH_CONFIG: OutreachConfig = {
   mobile: "+91 7217832613",
   contactEmail: "hello@eleviquecreations.com",
   website: "elevique.in",
+  customHook: "",
 };
 
 export const EMPTY_OUTREACH_CONFIG: OutreachConfig = ELEVIQUE_OUTREACH_CONFIG;
@@ -90,6 +92,7 @@ interface ValidatorState {
   appendResults: (batch: EmailResult[]) => void;
   markResultValid: (email: string) => void;
   markAllFlaggedValid: () => void;
+  markAllInvalidValid: () => void;
   setError: (msg: string | null) => void;
   setOutreachConfig: (config: OutreachConfig) => void;
   setDrafting: (v: boolean) => void;
@@ -135,6 +138,12 @@ export const useValidatorStore = create<ValidatorState>((set) => ({
     set((s) => ({
       results: s.results.map((r) =>
         r.status === "flagged" ? { ...r, status: "valid", reason: "Manually verified by user" } : r
+      ),
+    })),
+  markAllInvalidValid: () =>
+    set((s) => ({
+      results: s.results.map((r) =>
+        r.status === "invalid" ? { ...r, status: "valid", reason: "Manually verified by user" } : r
       ),
     })),
   setError: (msg) => set({ error: msg }),

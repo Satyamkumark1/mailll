@@ -46,7 +46,7 @@ export default function Home() {
     activeTab, emails, results, isValidating, progress, error,
     drafts, isDrafting, draftProgress, draftError, outreachConfig,
     sendResults, isSending, sendProgress,
-    setActiveTab, setEmails, setValidating, setProgress, appendResults, markResultValid, markAllFlaggedValid, setError, reset,
+    setActiveTab, setEmails, setValidating, setProgress, appendResults, markResultValid, markAllFlaggedValid, markAllInvalidValid, setError, reset,
     setOutreachConfig, setDrafting, setDraftProgress, appendDrafts, setDraftError, clearDrafts, updateDraft,
     setSending, setSendProgress, appendSendResults, clearSendResults,
   } = store;
@@ -928,6 +928,16 @@ export default function Home() {
                               Mark All Flagged Valid
                             </button>
                           )}
+                          {summary.invalid > 0 && (
+                            <button
+                              onClick={markAllInvalidValid}
+                              title="Manually mark every invalid email as valid based on your own checks — use with caution, these failed automated validation"
+                              className="flex items-center gap-sm rounded-lg border border-red-400/30 bg-red-400/10 px-md py-sm text-label-md font-bold text-red-400 hover:bg-red-400/20 transition-colors cursor-pointer shadow-sm whitespace-nowrap"
+                            >
+                              <Icon name="check_circle" className="text-[18px]" />
+                              Mark All Invalid Valid
+                            </button>
+                          )}
                           {validContacts.length > 0 && (
                             <button
                               onClick={() => setActiveTab("draft")}
@@ -1252,7 +1262,7 @@ export default function Home() {
                                   <span>⚡ Reset to Elevique Template</span>
                                 </button>
                                 <button
-                                  onClick={() => setOutreachConfig({ senderName: "", company: "", pitch: "", cta: "", signature: "", proofPoints: "", businessAddress: "", tone: "casual", title: "", mobile: "", contactEmail: "", website: "" })}
+                                  onClick={() => setOutreachConfig({ senderName: "", company: "", pitch: "", cta: "", signature: "", proofPoints: "", businessAddress: "", tone: "casual", title: "", mobile: "", contactEmail: "", website: "", customHook: "" })}
                                   className="cursor-pointer text-xs font-semibold text-on-surface-variant underline decoration-dotted hover:text-primary focus:outline-none focus:ring-2 focus:ring-primary/30"
                                 >
                                   Clear form
@@ -1274,6 +1284,14 @@ export default function Home() {
                             <div className="flex flex-col gap-1">
                               <label className="text-[10px] font-bold uppercase tracking-wider text-on-surface-variant">Pitch / Value Prop</label>
                               <textarea value={outreachConfig.pitch} onChange={(event) => updateConfig({ pitch: event.target.value })} placeholder="What do you offer, how are you different?" rows={3} className="rounded-lg border border-outline bg-surface-container-low px-md py-sm text-body-sm text-on-surface outline-none focus:border-primary focus:ring-2 focus:ring-primary/20" />
+                            </div>
+
+                            <div className="flex flex-col gap-1">
+                              <div className="flex items-center justify-between gap-sm">
+                                <label className="text-[10px] font-bold uppercase tracking-wider text-on-surface-variant">Custom Hook (Optional)</label>
+                                <span className="text-[11px] text-on-surface-variant">Skips AI personalization for all recipients</span>
+                              </div>
+                              <textarea value={outreachConfig.customHook} onChange={(event) => updateConfig({ customHook: event.target.value })} placeholder="Leave blank to let AI write a personalized opening hook per recipient. Type your own here to use the exact same hook for everyone instead." rows={2} className="rounded-lg border border-outline bg-surface-container-low px-md py-sm text-body-sm text-on-surface outline-none focus:border-primary focus:ring-2 focus:ring-primary/20" />
                             </div>
 
                             <div className="flex flex-col gap-1">
