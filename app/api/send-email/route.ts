@@ -2,6 +2,13 @@ import nodemailer from "nodemailer";
 import path from "node:path";
 import { LOGO_CID } from "@/lib/email-signature";
 import { ELEVIQUE_OUTREACH_CONFIG } from "@/lib/store";
+import { peekRateLimitStatus, reserveSendSlot } from "@/lib/send-rate-limiter";
+
+export const runtime = "nodejs";
+
+export async function GET() {
+  return Response.json(peekRateLimitStatus());
+}
 
 export async function POST(request: Request) {
   const { to, subject, body, html } = await request.json();
@@ -15,6 +22,18 @@ export async function POST(request: Request) {
     return Response.json(
       { error: "EMAIL_USER / EMAIL_PASSWORD not set in .env.local (server restart required after adding)" },
       { status: 500 }
+    );
+  }
+
+  const rateLimit = reserveSendSlot();
+  if (!rateLimit.allowed) {
+    return Response.json(
+      {
+        error: `Send limit reached (hourly ${rateLimit.hourly.used}/${rateLimit.hourly.cap}, daily ${rateLimit.daily.used}/${rateLimit.daily.cap}). Try again in ${rateLimit.retryAfterSeconds}s.`,
+        code: "RATE_LIMIT_EXCEEDED",
+        rateLimit,
+      },
+      { status: 429, headers: { "Retry-After": String(rateLimit.retryAfterSeconds) } }
     );
   }
 
@@ -44,10 +63,10 @@ export async function POST(request: Request) {
           }
         : {}),
     });
-    return Response.json({ success: true });
+    return Response.json({ success: true, rateLimit });
   } catch (err) {
     return Response.json(
-      { error: err instanceof Error ? err.message : "Send failed" },
+      { error: err instanceof Error ? err.message : "Send failed", rateLimit },
       { status: 502 }
     );
   }

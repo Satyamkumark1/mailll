@@ -36,6 +36,9 @@ yarn-error.log*
 # env files (can opt-in for committing if needed)
 .env*
 
+# local runtime state (send rate-limit log, etc.)
+/.data/
+
 # vercel
 .vercel
 
