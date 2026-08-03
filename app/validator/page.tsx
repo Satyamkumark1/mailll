@@ -45,10 +45,10 @@ export default function Home() {
   const {
     activeTab, emails, results, isValidating, progress, error,
     drafts, isDrafting, draftProgress, draftError, outreachConfig,
-    sendResults, isSending, sendProgress, rateLimitStatus, sendBlockedReason,
+    sendResults, isSending, sendProgress, rateLimitStatus, sendBlockedReason, sendAutoResumeCountdown,
     setActiveTab, setEmails, setValidating, setProgress, appendResults, markResultValid, markAllFlaggedValid, markAllInvalidValid, setError, reset,
     setOutreachConfig, setDrafting, setDraftProgress, appendDrafts, setDraftError, clearDrafts, updateDraft,
-    setSending, setSendProgress, appendSendResults, clearSendResults, setRateLimitStatus, setSendBlockedReason,
+    setSending, setSendProgress, appendSendResults, clearSendResults, setRateLimitStatus, setSendBlockedReason, setSendAutoResumeCountdown,
   } = store;
 
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -326,12 +326,20 @@ export default function Home() {
           hour: "2-digit",
           minute: "2-digit",
         });
-        setSendBlockedReason(`${msg} Resumes around ${resumeTime}.`);
+        setSendBlockedReason(`${msg} Auto-resuming next batch around ${resumeTime}.`);
         getSendRateStatus().then(setRateLimitStatus).catch(() => {});
+      },
+      true,
+      (sec) => {
+        setSendAutoResumeCountdown(sec);
+        if (sec === null) {
+          getSendRateStatus().then(setRateLimitStatus).catch(() => {});
+        }
       }
     );
 
     setSending(false);
+    setSendAutoResumeCountdown(null);
     getSendRateStatus().then(setRateLimitStatus).catch(() => {});
   }, [
     drafts,
@@ -343,12 +351,14 @@ export default function Home() {
     clearSendResults,
     setSendBlockedReason,
     setRateLimitStatus,
+    setSendAutoResumeCountdown,
   ]);
 
   const stopSend = useCallback(() => {
     cancelSendRef.current = true;
+    setSendAutoResumeCountdown(null);
     getSendRateStatus().then(setRateLimitStatus).catch(() => {});
-  }, [setRateLimitStatus]);
+  }, [setRateLimitStatus, setSendAutoResumeCountdown]);
 
   const tabEnabled = (tab: Tab) => {
     if (tab === "upload") return true;
@@ -1476,12 +1486,20 @@ export default function Home() {
                           <p className="mt-sm text-xs text-on-surface-variant font-medium">{PACING_PRESETS[pacing].note}</p>
                         </div>
 
-                        {sendBlockedReason && (
+                        {sendAutoResumeCountdown !== null && sendAutoResumeCountdown > 0 ? (
+                          <div className="flex items-center gap-sm rounded-lg border border-primary/30 bg-primary/10 px-md py-sm text-body-sm text-primary font-semibold animate-pulse">
+                            <Icon name="schedule" className="text-[18px]" />
+                            <span>
+                              Hourly send limit reached (20/20). Auto-resuming next batch in{" "}
+                              {Math.floor(sendAutoResumeCountdown / 60)}m {sendAutoResumeCountdown % 60}s... (queue remains active)
+                            </span>
+                          </div>
+                        ) : sendBlockedReason ? (
                           <div className="flex items-start gap-sm rounded-lg border border-red-500/20 bg-red-500/10 px-md py-sm text-body-sm text-red-400">
                             <Icon name="error" className="text-[18px]" />
                             <span>{sendBlockedReason}</span>
                           </div>
-                        )}
+                        ) : null}
 
                         {isSending && (
                           <div className="mt-lg pt-md border-t border-outline/50">
