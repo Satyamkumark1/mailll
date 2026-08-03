@@ -1,4 +1,7 @@
 import { create } from "zustand";
+import type { RateLimitStatus } from "./send-rate-limiter";
+
+export type { RateLimitStatus };
 
 export type EmailStatus = "valid" | "invalid" | "flagged";
 
@@ -58,10 +61,6 @@ export const ELEVIQUE_OUTREACH_CONFIG: OutreachConfig = {
   customHook: "",
 };
 
-import type { RateLimitStatus } from "./send-rate-limiter";
-
-export type { RateLimitStatus };
-
 export const EMPTY_OUTREACH_CONFIG: OutreachConfig = ELEVIQUE_OUTREACH_CONFIG;
 
 export type SendStatus = "sent" | "failed";
@@ -91,6 +90,7 @@ interface ValidatorState {
   sendProgress: { done: number; total: number };
   rateLimitStatus: RateLimitStatus | null;
   sendBlockedReason: string | null;
+  sendAutoResumeCountdown: number | null;
   setActiveTab: (tab: Tab) => void;
   setEmails: (emails: EmailRow[]) => void;
   setValidating: (v: boolean) => void;
@@ -113,6 +113,7 @@ interface ValidatorState {
   clearSendResults: () => void;
   setRateLimitStatus: (status: RateLimitStatus | null) => void;
   setSendBlockedReason: (reason: string | null) => void;
+  setSendAutoResumeCountdown: (sec: number | null) => void;
   reset: () => void;
 }
 
@@ -133,6 +134,7 @@ export const useValidatorStore = create<ValidatorState>((set) => ({
   sendProgress: { done: 0, total: 0 },
   rateLimitStatus: null,
   sendBlockedReason: null,
+  sendAutoResumeCountdown: null,
   setActiveTab: (tab) => set({ activeTab: tab }),
   setEmails: (emails) => set({ emails, results: [], error: null }),
   setValidating: (v) => set({ isValidating: v }),
@@ -167,12 +169,19 @@ export const useValidatorStore = create<ValidatorState>((set) => ({
     set((s) => ({
       drafts: s.drafts.map((d) => (d.email === email ? { ...d, ...patch } : d)),
     })),
-  setSending: (v) => set({ isSending: v }),
+  setSending: (v) => set((s) => ({ isSending: v, sendAutoResumeCountdown: v ? s.sendAutoResumeCountdown : null })),
   setSendProgress: (done, total) => set({ sendProgress: { done, total } }),
   appendSendResults: (batch) => set((s) => ({ sendResults: [...s.sendResults, ...batch] })),
-  clearSendResults: () => set({ sendResults: [], sendProgress: { done: 0, total: 0 }, sendBlockedReason: null }),
+  clearSendResults: () =>
+    set({
+      sendResults: [],
+      sendProgress: { done: 0, total: 0 },
+      sendBlockedReason: null,
+      sendAutoResumeCountdown: null,
+    }),
   setRateLimitStatus: (status) => set({ rateLimitStatus: status }),
   setSendBlockedReason: (reason) => set({ sendBlockedReason: reason }),
+  setSendAutoResumeCountdown: (sec) => set({ sendAutoResumeCountdown: sec }),
   reset: () =>
     set({
       emails: [],
@@ -189,7 +198,7 @@ export const useValidatorStore = create<ValidatorState>((set) => ({
       sendProgress: { done: 0, total: 0 },
       rateLimitStatus: null,
       sendBlockedReason: null,
+      sendAutoResumeCountdown: null,
       activeTab: "upload",
     }),
 }));
-

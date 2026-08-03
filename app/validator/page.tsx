@@ -19,14 +19,14 @@ import {
   type Tone,
 } from "@/lib/store";
 import { TABS } from "@/lib/tabs";
-import { cn, computeDraftsStale, downloadCsv, draftsToCsv, parseEmailCsv, resultsToCsv, type ParsedCsv } from "@/lib/utils";
+import { cn, computeDraftsStale, downloadCsv, downloadTextFile, draftsToCsv, parseEmailCsv, resultsToCsv, type ParsedCsv } from "@/lib/utils";
 
 const TONES: Tone[] = ["casual", "formal", "in-between"];
 
 const PACING_PRESETS = {
-  cautious: { label: "Cautious", minSec: 30, maxSec: 90, note: "Lowest risk of Zoho flagging bulk sends" },
+  cautious: { label: "Cautious", minSec: 30, maxSec: 90, note: "Lowest risk of Gmail flagging bulk sends" },
   balanced: { label: "Balanced", minSec: 10, maxSec: 25, note: "Faster, still randomized, moderate risk" },
-  fast: { label: "Fast", minSec: 3, maxSec: 8, note: "Meaningfully higher risk of Zoho flagging/limiting the account" },
+  fast: { label: "Fast", minSec: 3, maxSec: 8, note: "Meaningfully higher risk of Gmail flagging/limiting the account" },
 } as const;
 type PacingKey = keyof typeof PACING_PRESETS;
 
@@ -45,10 +45,10 @@ export default function Home() {
   const {
     activeTab, emails, results, isValidating, progress, error,
     drafts, isDrafting, draftProgress, draftError, outreachConfig,
-    sendResults, isSending, sendProgress, rateLimitStatus, sendBlockedReason,
+    sendResults, isSending, sendProgress, rateLimitStatus, sendBlockedReason, sendAutoResumeCountdown,
     setActiveTab, setEmails, setValidating, setProgress, appendResults, markResultValid, markAllFlaggedValid, markAllInvalidValid, setError, reset,
     setOutreachConfig, setDrafting, setDraftProgress, appendDrafts, setDraftError, clearDrafts, updateDraft,
-    setSending, setSendProgress, appendSendResults, clearSendResults, setRateLimitStatus, setSendBlockedReason,
+    setSending, setSendProgress, appendSendResults, clearSendResults, setRateLimitStatus, setSendBlockedReason, setSendAutoResumeCountdown,
   } = store;
 
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -303,7 +303,7 @@ export default function Home() {
         ? `${totalMinSec}-${totalMaxSec}s`
         : `${Math.round(totalMinSec / 60)}-${Math.round(totalMaxSec / 60)} min`;
     const confirmed = window.confirm(
-      `This will send ${drafts.length} real email(s) from your Zoho account, paced ${minSec}-${maxSec}s apart ` +
+      `This will send ${drafts.length} real email(s) from your Gmail account, paced ${minSec}-${maxSec}s apart ` +
         `(roughly ${durationEstimate} total). This cannot be undone once sent. Continue?`
     );
     if (!confirmed) return;
@@ -326,12 +326,20 @@ export default function Home() {
           hour: "2-digit",
           minute: "2-digit",
         });
-        setSendBlockedReason(`${msg} Resumes around ${resumeTime}.`);
+        setSendBlockedReason(`${msg} Auto-resuming next batch around ${resumeTime}.`);
         getSendRateStatus().then(setRateLimitStatus).catch(() => {});
+      },
+      true,
+      (sec) => {
+        setSendAutoResumeCountdown(sec);
+        if (sec === null) {
+          getSendRateStatus().then(setRateLimitStatus).catch(() => {});
+        }
       }
     );
 
     setSending(false);
+    setSendAutoResumeCountdown(null);
     getSendRateStatus().then(setRateLimitStatus).catch(() => {});
   }, [
     drafts,
@@ -343,12 +351,14 @@ export default function Home() {
     clearSendResults,
     setSendBlockedReason,
     setRateLimitStatus,
+    setSendAutoResumeCountdown,
   ]);
 
   const stopSend = useCallback(() => {
     cancelSendRef.current = true;
+    setSendAutoResumeCountdown(null);
     getSendRateStatus().then(setRateLimitStatus).catch(() => {});
-  }, [setRateLimitStatus]);
+  }, [setRateLimitStatus, setSendAutoResumeCountdown]);
 
   const tabEnabled = (tab: Tab) => {
     if (tab === "upload") return true;
@@ -1188,6 +1198,20 @@ export default function Home() {
                                   {copiedEmail === selectedDraft.email ? "Copied" : "Copy"}
                                 </button>
                                 <button
+                                  onClick={() =>
+                                    downloadTextFile(
+                                      `${selectedDraft.email}.txt`,
+                                      `Subject: ${selectedDraft.subject}\n\n${selectedDraft.body}`
+                                    )
+                                  }
+                                  disabled={isDraftDirty}
+                                  title={isDraftDirty ? "Save changes before downloading" : "Download this email as a text file"}
+                                  className="flex items-center gap-xs rounded-lg border border-outline bg-surface-container-low px-md py-sm text-label-md font-bold text-on-surface-variant transition-colors hover:border-primary hover:text-primary disabled:cursor-not-allowed disabled:opacity-45 focus:outline-none focus:ring-2 focus:ring-primary/30"
+                                >
+                                  <Icon name="download" className="text-[16px]" />
+                                  Download
+                                </button>
+                                <button
                                   onClick={discardDraftChanges}
                                   disabled={!isDraftDirty || isSending}
                                   className="flex items-center gap-xs rounded-lg border border-outline bg-surface-container-low px-md py-sm text-label-md font-bold text-on-surface-variant transition-colors hover:text-on-surface disabled:cursor-not-allowed disabled:opacity-45 focus:outline-none focus:ring-2 focus:ring-primary/30"
@@ -1476,12 +1500,20 @@ export default function Home() {
                           <p className="mt-sm text-xs text-on-surface-variant font-medium">{PACING_PRESETS[pacing].note}</p>
                         </div>
 
-                        {sendBlockedReason && (
+                        {sendAutoResumeCountdown !== null && sendAutoResumeCountdown > 0 ? (
+                          <div className="flex items-center gap-sm rounded-lg border border-primary/30 bg-primary/10 px-md py-sm text-body-sm text-primary font-semibold animate-pulse">
+                            <Icon name="schedule" className="text-[18px]" />
+                            <span>
+                              Hourly send limit reached (20/20). Auto-resuming next batch in{" "}
+                              {Math.floor(sendAutoResumeCountdown / 60)}m {sendAutoResumeCountdown % 60}s... (queue remains active)
+                            </span>
+                          </div>
+                        ) : sendBlockedReason ? (
                           <div className="flex items-start gap-sm rounded-lg border border-red-500/20 bg-red-500/10 px-md py-sm text-body-sm text-red-400">
                             <Icon name="error" className="text-[18px]" />
                             <span>{sendBlockedReason}</span>
                           </div>
-                        )}
+                        ) : null}
 
                         {isSending && (
                           <div className="mt-lg pt-md border-t border-outline/50">

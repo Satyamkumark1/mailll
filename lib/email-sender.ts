@@ -57,7 +57,8 @@ export async function getSendRateStatus(): Promise<RateLimitStatus> {
 // Sends one at a time with a randomized gap between sends, to avoid looking
 // like a bot blast to Zoho's abuse detection. shouldCancel is checked
 // between sends so a "Stop" button can halt mid-run without losing results
-// already recorded via onResult.
+// already recorded via onResult. When autoResume is true, it automatically
+// waits out rate-limit periods and resumes sending subsequent batches.
 export async function sendDraftsPaced(
   drafts: DraftResult[],
   config: OutreachConfig,
@@ -66,18 +67,40 @@ export async function sendDraftsPaced(
   onProgress: (done: number, total: number) => void,
   onResult: (result: SendResult) => void,
   shouldCancel: () => boolean,
-  onRateLimited?: (message: string, retryAfterSeconds: number) => void
+  onRateLimited?: (message: string, retryAfterSeconds: number) => void,
+  autoResume = true,
+  onAutoResumeWait?: (secondsRemaining: number | null) => void
 ): Promise<void> {
   for (let i = 0; i < drafts.length; i++) {
-    if (shouldCancel()) return;
+    if (shouldCancel()) {
+      onAutoResumeWait?.(null);
+      return;
+    }
     try {
       const result = await sendOne(drafts[i], config);
       onResult(result);
       onProgress(i + 1, drafts.length);
+      onAutoResumeWait?.(null);
     } catch (err) {
       if (err instanceof SendRateLimitedError) {
         onRateLimited?.(err.message, err.retryAfterSeconds);
-        return;
+        if (autoResume) {
+          let secondsRemaining = err.retryAfterSeconds + 2;
+          while (secondsRemaining > 0) {
+            if (shouldCancel()) {
+              onAutoResumeWait?.(null);
+              return;
+            }
+            onAutoResumeWait?.(secondsRemaining);
+            await new Promise((r) => setTimeout(r, 1000));
+            secondsRemaining--;
+          }
+          onAutoResumeWait?.(null);
+          i--; // Retry the current draft
+          continue;
+        } else {
+          return;
+        }
       }
     }
     if (i < drafts.length - 1 && !shouldCancel()) {
@@ -85,4 +108,5 @@ export async function sendDraftsPaced(
     }
   }
 }
+
 
