@@ -19,14 +19,14 @@ import {
   type Tone,
 } from "@/lib/store";
 import { TABS } from "@/lib/tabs";
-import { cn, computeDraftsStale, downloadCsv, draftsToCsv, parseEmailCsv, resultsToCsv, type ParsedCsv } from "@/lib/utils";
+import { cn, computeDraftsStale, downloadCsv, downloadTextFile, draftsToCsv, parseEmailCsv, resultsToCsv, type ParsedCsv } from "@/lib/utils";
 
 const TONES: Tone[] = ["casual", "formal", "in-between"];
 
 const PACING_PRESETS = {
-  cautious: { label: "Cautious", minSec: 30, maxSec: 90, note: "Lowest risk of Zoho flagging bulk sends" },
+  cautious: { label: "Cautious", minSec: 30, maxSec: 90, note: "Lowest risk of Gmail flagging bulk sends" },
   balanced: { label: "Balanced", minSec: 10, maxSec: 25, note: "Faster, still randomized, moderate risk" },
-  fast: { label: "Fast", minSec: 3, maxSec: 8, note: "Meaningfully higher risk of Zoho flagging/limiting the account" },
+  fast: { label: "Fast", minSec: 3, maxSec: 8, note: "Meaningfully higher risk of Gmail flagging/limiting the account" },
 } as const;
 type PacingKey = keyof typeof PACING_PRESETS;
 
@@ -303,7 +303,7 @@ export default function Home() {
         ? `${totalMinSec}-${totalMaxSec}s`
         : `${Math.round(totalMinSec / 60)}-${Math.round(totalMaxSec / 60)} min`;
     const confirmed = window.confirm(
-      `This will send ${drafts.length} real email(s) from your Zoho account, paced ${minSec}-${maxSec}s apart ` +
+      `This will send ${drafts.length} real email(s) from your Gmail account, paced ${minSec}-${maxSec}s apart ` +
         `(roughly ${durationEstimate} total). This cannot be undone once sent. Continue?`
     );
     if (!confirmed) return;
@@ -1196,6 +1196,20 @@ export default function Home() {
                                 >
                                   <Icon name={copiedEmail === selectedDraft.email ? "check" : "content_copy"} className="text-[16px]" />
                                   {copiedEmail === selectedDraft.email ? "Copied" : "Copy"}
+                                </button>
+                                <button
+                                  onClick={() =>
+                                    downloadTextFile(
+                                      `${selectedDraft.email}.txt`,
+                                      `Subject: ${selectedDraft.subject}\n\n${selectedDraft.body}`
+                                    )
+                                  }
+                                  disabled={isDraftDirty}
+                                  title={isDraftDirty ? "Save changes before downloading" : "Download this email as a text file"}
+                                  className="flex items-center gap-xs rounded-lg border border-outline bg-surface-container-low px-md py-sm text-label-md font-bold text-on-surface-variant transition-colors hover:border-primary hover:text-primary disabled:cursor-not-allowed disabled:opacity-45 focus:outline-none focus:ring-2 focus:ring-primary/30"
+                                >
+                                  <Icon name="download" className="text-[16px]" />
+                                  Download
                                 </button>
                                 <button
                                   onClick={discardDraftChanges}
