@@ -31,3 +31,4 @@ After generation, open generated emails in a focused full-page editor so users c
 - Editing is per recipient, not a bulk/template editor.
 - Draft edits are session-only and are cleared by refresh or Start Over, consistent with the current in-memory app behavior.
 - No API or database changes are needed; the existing send endpoint already accepts the editable subject and body.
+ hey

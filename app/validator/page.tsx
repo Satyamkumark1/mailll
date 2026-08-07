@@ -1,11 +1,11 @@
 "use client";
 
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { Icon } from "@/components/icon";
 import { Logo } from "@/components/logo";
 import { generateDrafts } from "@/lib/draft-generator";
-import { sendDraftsPaced } from "@/lib/email-sender";
+import { getSendRateStatus, sendDraftsPaced } from "@/lib/email-sender";
 import { buildSignatureHtml } from "@/lib/email-signature";
 import { validateEmails } from "@/lib/groq-validator";
 import {
@@ -45,10 +45,10 @@ export default function Home() {
   const {
     activeTab, emails, results, isValidating, progress, error,
     drafts, isDrafting, draftProgress, draftError, outreachConfig,
-    sendResults, isSending, sendProgress,
+    sendResults, isSending, sendProgress, rateLimitStatus, sendBlockedReason, sendAutoResumeCountdown,
     setActiveTab, setEmails, setValidating, setProgress, appendResults, markResultValid, markAllFlaggedValid, markAllInvalidValid, setError, reset,
     setOutreachConfig, setDrafting, setDraftProgress, appendDrafts, setDraftError, clearDrafts, updateDraft,
-    setSending, setSendProgress, appendSendResults, clearSendResults,
+    setSending, setSendProgress, appendSendResults, clearSendResults, setRateLimitStatus, setSendBlockedReason, setSendAutoResumeCountdown,
   } = store;
 
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -313,6 +313,12 @@ export default function Home() {
     outreachConfig.contactEmail.trim() &&
     outreachConfig.website.trim();
 
+  useEffect(() => {
+    if (activeTab === "send") {
+      getSendRateStatus().then(setRateLimitStatus).catch(() => {});
+    }
+  }, [activeTab, setRateLimitStatus]);
+
   const startSend = useCallback(async () => {
     const { minSec, maxSec } = PACING_PRESETS[pacing];
     const totalMinSec = drafts.length * minSec;
@@ -339,15 +345,45 @@ export default function Home() {
       maxSec * 1000,
       (done, total) => setSendProgress(done, total),
       (result) => appendSendResults([result]),
-      () => cancelSendRef.current
+      () => cancelSendRef.current,
+      (msg, retryAfterSec) => {
+        const resumeTime = new Date(Date.now() + retryAfterSec * 1000).toLocaleTimeString([], {
+          hour: "2-digit",
+          minute: "2-digit",
+        });
+        setSendBlockedReason(`${msg} Auto-resuming next batch around ${resumeTime}.`);
+        getSendRateStatus().then(setRateLimitStatus).catch(() => {});
+      },
+      true,
+      (sec) => {
+        setSendAutoResumeCountdown(sec);
+        if (sec === null) {
+          getSendRateStatus().then(setRateLimitStatus).catch(() => {});
+        }
+      }
     );
 
     setSending(false);
-  }, [drafts, outreachConfig, pacing, setSending, setSendProgress, appendSendResults, clearSendResults]);
+    setSendAutoResumeCountdown(null);
+    getSendRateStatus().then(setRateLimitStatus).catch(() => {});
+  }, [
+    drafts,
+    outreachConfig,
+    pacing,
+    setSending,
+    setSendProgress,
+    appendSendResults,
+    clearSendResults,
+    setSendBlockedReason,
+    setRateLimitStatus,
+    setSendAutoResumeCountdown,
+  ]);
 
   const stopSend = useCallback(() => {
     cancelSendRef.current = true;
-  }, []);
+    setSendAutoResumeCountdown(null);
+    getSendRateStatus().then(setRateLimitStatus).catch(() => {});
+  }, [setRateLimitStatus, setSendAutoResumeCountdown]);
 
   const tabEnabled = (tab: Tab) => {
     if (tab === "upload") return true;
@@ -1206,6 +1242,20 @@ export default function Home() {
                                   {copiedEmail === selectedDraft.email ? "Copied" : "Copy"}
                                 </button>
                                 <button
+                                  onClick={() =>
+                                    downloadTextFile(
+                                      `${selectedDraft.email}.txt`,
+                                      `Subject: ${selectedDraft.subject}\n\n${selectedDraft.body}`
+                                    )
+                                  }
+                                  disabled={isDraftDirty}
+                                  title={isDraftDirty ? "Save changes before downloading" : "Download this email as a text file"}
+                                  className="flex items-center gap-xs rounded-lg border border-outline bg-surface-container-low px-md py-sm text-label-md font-bold text-on-surface-variant transition-colors hover:border-primary hover:text-primary disabled:cursor-not-allowed disabled:opacity-45 focus:outline-none focus:ring-2 focus:ring-primary/30"
+                                >
+                                  <Icon name="download" className="text-[16px]" />
+                                  Download
+                                </button>
+                                <button
                                   onClick={discardDraftChanges}
                                   disabled={!isDraftDirty || isSending}
                                   className="flex items-center gap-xs rounded-lg border border-outline bg-surface-container-low px-md py-sm text-label-md font-bold text-on-surface-variant transition-colors hover:text-on-surface disabled:cursor-not-allowed disabled:opacity-45 focus:outline-none focus:ring-2 focus:ring-primary/30"
@@ -1510,6 +1560,21 @@ export default function Home() {
                           <p className="mt-sm text-xs text-on-surface-variant font-medium">{PACING_PRESETS[pacing].note}</p>
                         </div>
 
+                        {sendAutoResumeCountdown !== null && sendAutoResumeCountdown > 0 ? (
+                          <div className="flex items-center gap-sm rounded-lg border border-primary/30 bg-primary/10 px-md py-sm text-body-sm text-primary font-semibold animate-pulse">
+                            <Icon name="schedule" className="text-[18px]" />
+                            <span>
+                              Hourly send limit reached (20/20). Auto-resuming next batch in{" "}
+                              {Math.floor(sendAutoResumeCountdown / 60)}m {sendAutoResumeCountdown % 60}s... (queue remains active)
+                            </span>
+                          </div>
+                        ) : sendBlockedReason ? (
+                          <div className="flex items-start gap-sm rounded-lg border border-red-500/20 bg-red-500/10 px-md py-sm text-body-sm text-red-400">
+                            <Icon name="error" className="text-[18px]" />
+                            <span>{sendBlockedReason}</span>
+                          </div>
+                        ) : null}
+
                         {isSending && (
                           <div className="mt-lg pt-md border-t border-outline/50">
                             <div className="mb-2 flex justify-between text-xs font-mono text-primary font-bold">
@@ -1528,11 +1593,23 @@ export default function Home() {
                           </div>
                         )}
 
-                        <div className="mt-lg flex gap-md">
+                        {rateLimitStatus && (
+                          <p className="text-xs font-mono text-on-surface-variant font-medium">
+                            {rateLimitStatus.hourly.remaining} sends left this hour · {rateLimitStatus.daily.remaining} left today
+                          </p>
+                        )}
+
+                        <div className="mt-md flex gap-md">
                           <button
                             onClick={startSend}
-                            disabled={isSending || drafts.length === 0 || draftsStale}
-                            title={draftsStale ? "Regenerate drafts to include newly-approved contacts before sending" : undefined}
+                            disabled={isSending || drafts.length === 0 || draftsStale || (rateLimitStatus ? !rateLimitStatus.allowed : false)}
+                            title={
+                              draftsStale
+                                ? "Regenerate drafts to include newly-approved contacts before sending"
+                                : rateLimitStatus && !rateLimitStatus.allowed
+                                ? "Send rate limit reached"
+                                : undefined
+                            }
                             className="flex items-center gap-sm rounded-lg bg-primary px-lg py-md text-label-md font-extrabold text-on-primary shadow-lg shadow-primary/20 transition-all hover:scale-[1.02] active:scale-95 disabled:opacity-50 cursor-pointer"
                           >
                             <Icon name="send" className="text-[18px]" />
