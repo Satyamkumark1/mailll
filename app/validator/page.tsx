@@ -1242,18 +1242,12 @@ export default function Home() {
                                   {copiedEmail === selectedDraft.email ? "Copied" : "Copy"}
                                 </button>
                                 <button
-                                  onClick={() =>
-                                    downloadTextFile(
-                                      `${selectedDraft.email}.txt`,
-                                      `Subject: ${selectedDraft.subject}\n\n${selectedDraft.body}`
-                                    )
-                                  }
-                                  disabled={isDraftDirty}
-                                  title={isDraftDirty ? "Save changes before downloading" : "Download this email as a text file"}
-                                  className="flex items-center gap-xs rounded-lg border border-outline bg-surface-container-low px-md py-sm text-label-md font-bold text-on-surface-variant transition-colors hover:border-primary hover:text-primary disabled:cursor-not-allowed disabled:opacity-45 focus:outline-none focus:ring-2 focus:ring-primary/30"
+                                  onClick={() => downloadTextFile("outreach-drafts.txt", draftsToText(drafts))}
+                                  title={`Download all ${drafts.length} draft${drafts.length === 1 ? "" : "s"} as a single text file`}
+                                  className="flex items-center gap-xs rounded-lg border border-primary bg-primary/10 px-md py-sm text-label-md font-extrabold text-primary transition-colors hover:bg-primary/20 focus:outline-none focus:ring-2 focus:ring-primary/30"
                                 >
-                                  <Icon name="download" className="text-[16px]" />
-                                  Download
+                                  <Icon name="download_for_offline" className="text-[16px]" />
+                                  Download All ({drafts.length})
                                 </button>
                                 <button
                                   onClick={discardDraftChanges}
