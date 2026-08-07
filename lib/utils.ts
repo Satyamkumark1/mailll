@@ -145,6 +145,12 @@ export function downloadCsv(filename: string, csv: string) {
   URL.revokeObjectURL(url);
 }
 
+export function draftsToText(drafts: DraftResult[]): string {
+  return drafts
+    .map((d) => `To: ${d.email}\nSubject: ${d.subject}\n\n${d.body}`)
+    .join(`\n\n${"-".repeat(40)}\n\n`);
+}
+
 export function downloadTextFile(filename: string, text: string) {
   const blob = new Blob([text], { type: "text/plain;charset=utf-8;" });
   const url = URL.createObjectURL(blob);
