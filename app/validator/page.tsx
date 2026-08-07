@@ -19,7 +19,7 @@ import {
   type Tone,
 } from "@/lib/store";
 import { TABS } from "@/lib/tabs";
-import { cn, computeDraftsStale, downloadCsv, draftsToCsv, parseEmailCsv, resultsToCsv, type ParsedCsv } from "@/lib/utils";
+import { cn, computeDraftsStale, downloadCsv, downloadTextFile, draftsToCsv, draftsToText, parseEmailCsv, resultsToCsv, type ParsedCsv } from "@/lib/utils";
 
 const TONES: Tone[] = ["casual", "formal", "in-between"];
 
@@ -58,6 +58,7 @@ export default function Home() {
   const [resultsSearch, setResultsSearch] = useState("");
   const [parseInfo, setParseInfo] = useState<ParsedCsv | null>(null);
   const [copiedEmail, setCopiedEmail] = useState<string | null>(null);
+  const [copiedAllDrafts, setCopiedAllDrafts] = useState(false);
   const [pacing, setPacing] = useState<PacingKey>("cautious");
   const cancelSendRef = useRef(false);
   const [singleEmail, setSingleEmail] = useState("");
@@ -148,6 +149,20 @@ export default function Home() {
     }
   }, [emails, setValidating, setProgress, appendResults, setActiveTab, setError]);
 
+  const skipValidation = useCallback(() => {
+    const confirmed = window.confirm(
+      `Skip validation for all ${emails.length} contact(s)? They'll be marked valid without any local, MX/SMTP, or AI checks — you risk sending to broken or fake addresses.`
+    );
+    if (!confirmed) return;
+    const skipped: EmailResult[] = emails.map((row) => ({
+      ...row,
+      status: "valid",
+      reason: "Validation skipped by user",
+    }));
+    appendResults(skipped);
+    setActiveTab("results");
+  }, [emails, appendResults, setActiveTab]);
+
   const checkSingleEmail = useCallback(async () => {
     const email = singleEmail.trim();
     if (!email) return;
@@ -210,6 +225,16 @@ export default function Home() {
     },
     [setDraftError]
   );
+
+  const copyAllDrafts = useCallback(() => {
+    navigator.clipboard.writeText(draftsToText(drafts)).then(
+      () => {
+        setCopiedAllDrafts(true);
+        setTimeout(() => setCopiedAllDrafts(false), 2000);
+      },
+      () => setDraftError("Couldn't copy to clipboard — your browser may be blocking clipboard access.")
+    );
+  }, [drafts, setDraftError]);
 
   const openDraftEditor = useCallback((email: string) => {
     const draft = drafts.find((item) => item.email === email);
@@ -705,6 +730,16 @@ export default function Home() {
                                 Start Validation
                               </button>
                             )}
+                            {!isValidating && (
+                              <button
+                                onClick={skipValidation}
+                                title="Mark every contact valid without running any checks"
+                                className="flex items-center gap-sm rounded-lg border border-outline bg-surface px-lg py-sm text-label-md font-bold text-on-surface-variant transition-colors hover:border-amber-400/50 hover:text-amber-400 cursor-pointer"
+                              >
+                                <Icon name="skip_next" className="text-[18px]" />
+                                Skip Validation
+                              </button>
+                            )}
                           </div>
                         </div>
 
@@ -1153,6 +1188,15 @@ export default function Home() {
                               </div>
                               <div className="flex flex-wrap items-center gap-sm">
                                 <button
+                                  onClick={() => downloadTextFile(`${selectedDraft.email}.txt`, `Subject: ${selectedDraft.subject}\n\n${selectedDraft.body}`)}
+                                  disabled={isDraftDirty}
+                                  title={isDraftDirty ? "Save changes before downloading" : "Download this email as a text file"}
+                                  className="flex items-center gap-xs rounded-lg border border-outline bg-surface-container-low px-md py-sm text-label-md font-bold text-on-surface-variant transition-colors hover:border-primary hover:text-primary disabled:cursor-not-allowed disabled:opacity-45 focus:outline-none focus:ring-2 focus:ring-primary/30"
+                                >
+                                  <Icon name="download" className="text-[16px]" />
+                                  Download
+                                </button>
+                                <button
                                   onClick={() => copyDraft(selectedDraft.email, selectedDraft.subject, selectedDraft.body)}
                                   disabled={isDraftDirty}
                                   title={isDraftDirty ? "Save changes before copying" : "Copy saved email"}
@@ -1230,6 +1274,22 @@ export default function Home() {
                                 >
                                   <Icon name="download" className="text-[18px]" />
                                   CSV
+                                </button>
+                                <button
+                                  onClick={() => downloadTextFile("outreach-drafts.txt", draftsToText(drafts))}
+                                  title="Download all drafts as a single readable text file"
+                                  className="flex items-center gap-xs rounded-lg border border-outline bg-surface px-md py-sm text-label-md font-bold text-on-surface-variant transition-colors hover:border-primary hover:text-primary focus:outline-none focus:ring-2 focus:ring-primary/30"
+                                >
+                                  <Icon name="download" className="text-[18px]" />
+                                  TXT
+                                </button>
+                                <button
+                                  onClick={copyAllDrafts}
+                                  title="Copy all drafts to the clipboard as text"
+                                  className="flex items-center gap-xs rounded-lg border border-outline bg-surface px-md py-sm text-label-md font-bold text-on-surface-variant transition-colors hover:border-primary hover:text-primary focus:outline-none focus:ring-2 focus:ring-primary/30"
+                                >
+                                  <Icon name={copiedAllDrafts ? "check" : "content_copy"} className="text-[18px]" />
+                                  {copiedAllDrafts ? "Copied" : "Copy All"}
                                 </button>
                                 <button
                                   onClick={() => openDraftEditor(selectedDraftEmail ?? drafts[0].email)}
