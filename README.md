@@ -79,7 +79,6 @@ This installs Node/pm2/Caddy, builds and starts the verifier under pm2 (survives
 ## Tech stack
 
 Next.js 16 (App Router, Turbopack) · React 19 · TypeScript · Tailwind CSS v4 · Zustand (client state, no persistence — a refresh clears the pipeline by design) · Groq (Llama 3.1) for AI validation and drafting · Nodemailer for sending · Papaparse for CSV parsing.
-
 ## Deploying
 
 Deploy the Next.js app to [Vercel](https://vercel.com) as usual, with the environment variables above set in the project settings. Deploy `verifier-service/` separately (see above) only if you need deep verification without Abstract API.

@@ -1558,7 +1558,8 @@ export default function Home() {
                           <div className="flex items-center gap-sm rounded-lg border border-primary/30 bg-primary/10 px-md py-sm text-body-sm text-primary font-semibold animate-pulse">
                             <Icon name="schedule" className="text-[18px]" />
                             <span>
-                              Hourly send limit reached (20/20). Auto-resuming next batch in{" "}
+                              Hourly send limit reached
+                              {rateLimitStatus ? ` (${rateLimitStatus.hourly.cap}/${rateLimitStatus.hourly.cap})` : ""}. Auto-resuming next batch in{" "}
                               {Math.floor(sendAutoResumeCountdown / 60)}m {sendAutoResumeCountdown % 60}s... (queue remains active)
                             </span>
                           </div>
