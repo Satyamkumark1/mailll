@@ -79,7 +79,7 @@ export function computeRateLimitStatus(
 
 export function getRateLimitConfig(): RateLimitConfig {
   return {
-    hourlyCap: Number(process.env.EMAIL_HOURLY_CAP) || 20,
+    hourlyCap: Number(process.env.EMAIL_HOURLY_CAP) || 35,
     dailyCap: Number(process.env.EMAIL_DAILY_CAP) || 150,
   };
 }
