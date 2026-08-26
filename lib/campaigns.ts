@@ -13,7 +13,7 @@ export interface CampaignEmailSummary {
   sentAt: string | null;
 }
 
-export interface CampaignSummary {
+export interface CampaignListItem {
   id: string;
   status: CampaignStatus;
   createdAt: string;
@@ -22,6 +22,9 @@ export interface CampaignSummary {
   totalCount: number;
   sentCount: number;
   failedCount: number;
+}
+
+export interface CampaignSummary extends CampaignListItem {
   emails: CampaignEmailSummary[];
 }
 
@@ -65,6 +68,25 @@ export async function createCampaign({ drafts, config, durationHours }: CreateCa
   `;
 
   return campaignId;
+}
+
+export async function listCampaigns(limit = 50): Promise<CampaignListItem[]> {
+  const rows = await sql`
+    SELECT id, status, created_at, window_start, window_end, total_count, sent_count, failed_count
+    FROM campaigns
+    ORDER BY created_at DESC
+    LIMIT ${limit}
+  `;
+  return rows.map((c) => ({
+    id: c.id as string,
+    status: c.status as CampaignStatus,
+    createdAt: c.created_at as string,
+    windowStart: c.window_start as string,
+    windowEnd: c.window_end as string,
+    totalCount: c.total_count as number,
+    sentCount: c.sent_count as number,
+    failedCount: c.failed_count as number,
+  }));
 }
 
 export async function getCampaign(id: string): Promise<CampaignSummary | null> {

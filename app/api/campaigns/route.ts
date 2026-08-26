@@ -1,5 +1,5 @@
 import { computeMinDurationHours, formatDurationHours } from "@/lib/campaign-schedule";
-import { createCampaign } from "@/lib/campaigns";
+import { createCampaign, listCampaigns } from "@/lib/campaigns";
 import { getRateLimitConfig } from "@/lib/send-rate-limiter";
 import type { DraftResult, OutreachConfig } from "@/lib/store";
 
@@ -9,6 +9,11 @@ interface CreateCampaignBody {
   drafts: DraftResult[];
   config: OutreachConfig;
   durationHours: number;
+}
+
+export async function GET() {
+  const campaigns = await listCampaigns();
+  return Response.json({ campaigns });
 }
 
 export async function POST(request: Request) {

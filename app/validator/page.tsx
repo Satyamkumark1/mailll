@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { Icon } from "@/components/icon";
 import { Logo } from "@/components/logo";
-import { cancelBackgroundCampaign, createBackgroundCampaign, getCampaignStatus, type CampaignView } from "@/lib/campaign-client";
+import { cancelBackgroundCampaign, createBackgroundCampaign, getCampaignStatus, listCampaigns, type CampaignListView, type CampaignView } from "@/lib/campaign-client";
 import { computeMinDurationHours, formatDurationHours } from "@/lib/campaign-schedule";
 import { generateDrafts } from "@/lib/draft-generator";
 import { getSendRateStatus, sendDraftsPaced } from "@/lib/email-sender";
@@ -35,6 +35,12 @@ type PacingKey = keyof typeof PACING_PRESETS;
 const SEND_STATUS_STYLES: Record<SendStatus, string> = {
   sent: "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20",
   failed: "bg-red-500/10 text-red-400 border border-red-500/20",
+};
+
+const CAMPAIGN_STATUS_STYLES: Record<CampaignListView["status"], string> = {
+  running: "bg-primary/10 text-primary border border-primary/20",
+  completed: "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20",
+  canceled: "bg-on-surface-variant/10 text-on-surface-variant border border-outline",
 };
 
 const CAMPAIGN_ID_STORAGE_KEY = "elevique_active_campaign_id";
@@ -72,6 +78,8 @@ export default function Home() {
   const [campaign, setCampaign] = useState<CampaignView | null>(null);
   const [campaignError, setCampaignError] = useState<string | null>(null);
   const [isSchedulingCampaign, setIsSchedulingCampaign] = useState(false);
+  const [campaignHistory, setCampaignHistory] = useState<CampaignListView[] | null>(null);
+  const [historyError, setHistoryError] = useState<string | null>(null);
   const [singleEmail, setSingleEmail] = useState("");
   const [singleResult, setSingleResult] = useState<EmailResult | null>(null);
   const [isCheckingSingle, setIsCheckingSingle] = useState(false);
@@ -407,6 +415,41 @@ export default function Home() {
     setCampaign(null);
   }, [setActiveCampaignId]);
 
+  // Campaign history is read fresh from the server every time — unlike the
+  // single "active" campaign above, it doesn't depend on localStorage, so
+  // it's the one place you can always find a campaign's outcome even if
+  // you never reopened the tab that scheduled it.
+  useEffect(() => {
+    if (activeTab !== "history") return;
+    const load = () =>
+      listCampaigns()
+        .then(setCampaignHistory)
+        .catch((err) => setHistoryError(err instanceof Error ? err.message : "Failed to load campaign history"));
+    load();
+    const interval = setInterval(load, CAMPAIGN_POLL_MS);
+    return () => clearInterval(interval);
+  }, [activeTab]);
+
+  const trackCampaign = useCallback(
+    (id: string) => {
+      window.localStorage.setItem(CAMPAIGN_ID_STORAGE_KEY, id);
+      setActiveCampaignId(id);
+      setSendMode("schedule");
+      setActiveTab("send");
+    },
+    [setActiveCampaignId, setActiveTab]
+  );
+
+  const cancelCampaignFromHistory = useCallback(async (id: string) => {
+    if (!window.confirm("Cancel this background campaign? Emails already sent cannot be recalled.")) return;
+    try {
+      await cancelBackgroundCampaign(id);
+      setCampaignHistory(await listCampaigns());
+    } catch (err) {
+      setHistoryError(err instanceof Error ? err.message : "Failed to cancel campaign");
+    }
+  }, []);
+
   const startSend = useCallback(async () => {
     const { minSec, maxSec } = PACING_PRESETS[pacing];
     const totalMinSec = drafts.length * minSec;
@@ -475,6 +518,7 @@ export default function Home() {
 
   const tabEnabled = (tab: Tab) => {
     if (tab === "upload") return true;
+    if (tab === "history") return true;
     if (tab === "validate") return emails.length > 0;
     if (tab === "draft") return validContacts.length > 0;
     if (tab === "send") return drafts.length > 0 && !draftsStale;
@@ -488,6 +532,7 @@ export default function Home() {
     draft: drafts.length > 0,
     send: sendResults.length > 0,
     export: false,
+    history: false,
   };
 
   const groqConnected = Boolean(process.env.NEXT_PUBLIC_GROQ_API_KEY);
@@ -1913,6 +1958,89 @@ export default function Home() {
                               Download All (TXT)
                             </button>
                           </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* HISTORY STAGE */}
+                  {activeTab === "history" && (
+                    <div className="space-y-lg">
+                      <div className="space-y-xs">
+                        <span className="text-[10px] font-bold text-primary uppercase tracking-wider">History</span>
+                        <h1 className="text-headline-lg font-bold text-on-surface tracking-tight">Campaign History</h1>
+                        <p className="text-body-md text-on-surface-variant">
+                          Every background campaign ever scheduled from this app, read fresh from the server — this works even if you never reopen the tab that started one.
+                        </p>
+                      </div>
+
+                      {historyError && (
+                        <div className="flex items-start gap-sm rounded-xl border border-red-500/20 bg-red-500/10 px-md py-sm text-body-sm text-red-400">
+                          <Icon name="error" className="text-[18px]" />
+                          <span>{historyError}</span>
+                        </div>
+                      )}
+
+                      {campaignHistory === null ? (
+                        <p className="text-body-sm text-on-surface-variant">Loading...</p>
+                      ) : campaignHistory.length === 0 ? (
+                        <div className="flex flex-col items-center gap-md rounded-2xl border border-outline bg-surface p-xl text-center shadow-lg">
+                          <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-primary/10 text-primary border border-primary/20">
+                            <Icon name="history" className="text-[32px] font-bold" />
+                          </div>
+                          <h3 className="text-headline-md font-bold text-on-surface">No campaigns yet</h3>
+                          <p className="text-body-sm text-on-surface-variant max-w-[24rem]">
+                            Schedule a background campaign from the Send stage and it&apos;ll show up here.
+                          </p>
+                        </div>
+                      ) : (
+                        <div className="overflow-hidden rounded-xl border border-outline bg-surface shadow-sm">
+                          <table className="w-full border-collapse text-left text-body-sm">
+                            <thead className="bg-surface-container border-b border-outline select-none">
+                              <tr>
+                                <th className="px-md py-md text-[10px] font-bold uppercase tracking-wider text-on-surface-variant">Created</th>
+                                <th className="px-md py-md text-[10px] font-bold uppercase tracking-wider text-on-surface-variant">Status</th>
+                                <th className="px-md py-md text-[10px] font-bold uppercase tracking-wider text-on-surface-variant">Progress</th>
+                                <th className="px-md py-md text-[10px] font-bold uppercase tracking-wider text-on-surface-variant">Actions</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-outline/40">
+                              {campaignHistory.map((c) => (
+                                <tr key={c.id} className="hover:bg-surface-container/20">
+                                  <td className="px-md py-md text-xs text-on-surface-variant font-mono">
+                                    {new Date(c.createdAt).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}
+                                  </td>
+                                  <td className="px-md py-md select-none">
+                                    <span className={cn("rounded px-sm py-[2px] text-[10px] font-bold uppercase inline-block text-center", CAMPAIGN_STATUS_STYLES[c.status])}>
+                                      {c.status}
+                                    </span>
+                                  </td>
+                                  <td className="px-md py-md text-xs text-on-surface font-mono">
+                                    {c.sentCount + c.failedCount} / {c.totalCount} processed
+                                    {c.failedCount > 0 && <span className="ml-sm text-red-400 font-bold">{c.failedCount} failed</span>}
+                                  </td>
+                                  <td className="px-md py-md">
+                                    <div className="flex gap-sm">
+                                      <button
+                                        onClick={() => trackCampaign(c.id)}
+                                        className="rounded-lg border border-outline bg-surface-container-low px-sm py-xs text-xs font-bold text-on-surface transition-colors hover:bg-surface-container cursor-pointer"
+                                      >
+                                        View
+                                      </button>
+                                      {c.status === "running" && (
+                                        <button
+                                          onClick={() => cancelCampaignFromHistory(c.id)}
+                                          className="rounded-lg border border-red-500/25 bg-red-500/10 px-sm py-xs text-xs font-bold text-red-300 transition-colors hover:bg-red-500/20 cursor-pointer"
+                                        >
+                                          Cancel
+                                        </button>
+                                      )}
+                                    </div>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
                         </div>
                       )}
                     </div>

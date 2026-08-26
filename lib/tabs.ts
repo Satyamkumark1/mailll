@@ -38,4 +38,10 @@ export const TABS: { id: Tab; label: string; icon: string; description: string }
     icon: "ios_share",
     description: "Download the full results, valid-only list, or generated drafts as CSV.",
   },
+  {
+    id: "history",
+    label: "History",
+    icon: "history",
+    description: "Browse past and running background campaigns, their progress, and any failures.",
+  },
 ];

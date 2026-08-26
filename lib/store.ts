@@ -71,7 +71,7 @@ export interface SendResult {
   error?: string;
 }
 
-export type Tab = "upload" | "validate" | "results" | "draft" | "send" | "export";
+export type Tab = "upload" | "validate" | "results" | "draft" | "send" | "export" | "history";
 
 interface ValidatorState {
   activeTab: Tab;

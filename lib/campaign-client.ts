@@ -8,7 +8,7 @@ export interface CampaignEmailView {
   sentAt: string | null;
 }
 
-export interface CampaignView {
+export interface CampaignListView {
   id: string;
   status: CampaignStatus;
   createdAt: string;
@@ -17,6 +17,9 @@ export interface CampaignView {
   totalCount: number;
   sentCount: number;
   failedCount: number;
+}
+
+export interface CampaignView extends CampaignListView {
   emails: CampaignEmailView[];
 }
 
@@ -35,6 +38,15 @@ export async function createBackgroundCampaign(
     throw new Error(data.error || `Failed to schedule campaign (HTTP ${res.status})`);
   }
   return data;
+}
+
+export async function listCampaigns(): Promise<CampaignListView[]> {
+  const res = await fetch("/api/campaigns");
+  if (!res.ok) {
+    throw new Error(`Failed to load campaign history (HTTP ${res.status})`);
+  }
+  const data = await res.json();
+  return data.campaigns;
 }
 
 export async function getCampaignStatus(id: string): Promise<CampaignView> {
