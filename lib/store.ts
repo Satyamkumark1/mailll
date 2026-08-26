@@ -91,6 +91,8 @@ interface ValidatorState {
   rateLimitStatus: RateLimitStatus | null;
   sendBlockedReason: string | null;
   sendAutoResumeCountdown: number | null;
+  activeCampaignId: string | null;
+  setActiveCampaignId: (id: string | null) => void;
   setActiveTab: (tab: Tab) => void;
   setEmails: (emails: EmailRow[]) => void;
   setValidating: (v: boolean) => void;
@@ -135,6 +137,8 @@ export const useValidatorStore = create<ValidatorState>((set) => ({
   rateLimitStatus: null,
   sendBlockedReason: null,
   sendAutoResumeCountdown: null,
+  activeCampaignId: null,
+  setActiveCampaignId: (id) => set({ activeCampaignId: id }),
   setActiveTab: (tab) => set({ activeTab: tab }),
   setEmails: (emails) => set({ emails, results: [], error: null }),
   setValidating: (v) => set({ isValidating: v }),

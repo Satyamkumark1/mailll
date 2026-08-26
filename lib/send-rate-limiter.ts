@@ -1,5 +1,4 @@
-import fs from "node:fs";
-import path from "node:path";
+import { sql } from "./db.ts";
 
 export interface RateLimitConfig {
   hourlyCap: number;
@@ -84,57 +83,34 @@ export function getRateLimitConfig(): RateLimitConfig {
   };
 }
 
-function getLogFilePath(): string {
-  return path.join(process.cwd(), ".data", "send-log.json");
-}
-
-function readLogFile(): number[] {
+async function readAttempts(now: number): Promise<number[]> {
   try {
-    const filePath = getLogFilePath();
-    if (!fs.existsSync(filePath)) {
-      return [];
-    }
-    const raw = fs.readFileSync(filePath, "utf-8");
-    const parsed = JSON.parse(raw);
-    if (parsed && Array.isArray(parsed.attempts)) {
-      return parsed.attempts.filter((t: unknown): t is number => typeof t === "number");
-    }
-    return [];
+    const rows = await sql`
+      SELECT extract(epoch from sent_at) * 1000 AS ts
+      FROM send_attempts
+      WHERE sent_at > to_timestamp(${(now - DAILY_MS) / 1000})
+    `;
+    return rows.map((r) => Number(r.ts));
   } catch (err) {
-    console.warn("Failed to read send-log.json, failing open:", err);
+    console.warn("Failed to read send_attempts, failing open:", err);
     return [];
   }
 }
 
-function writeLogFile(attempts: number[], now: number): void {
-  try {
-    const dataDir = path.join(process.cwd(), ".data");
-    if (!fs.existsSync(dataDir)) {
-      fs.mkdirSync(dataDir, { recursive: true });
-    }
-    const filePath = getLogFilePath();
-    const pruned = attempts.filter((t) => t > now - DAILY_MS);
-    fs.writeFileSync(filePath, JSON.stringify({ version: 1, attempts: pruned }, null, 2), "utf-8");
-  } catch (err) {
-    console.warn("Failed to write send-log.json:", err);
-  }
-}
-
-export function peekRateLimitStatus(now = Date.now()): RateLimitStatus {
-  const attempts = readLogFile();
+export async function peekRateLimitStatus(now = Date.now()): Promise<RateLimitStatus> {
+  const attempts = await readAttempts(now);
   const config = getRateLimitConfig();
   return computeRateLimitStatus(attempts, config, now);
 }
 
-export function reserveSendSlot(now = Date.now()): RateLimitStatus {
-  const attempts = readLogFile();
+export async function reserveSendSlot(now = Date.now()): Promise<RateLimitStatus> {
+  const attempts = await readAttempts(now);
   const config = getRateLimitConfig();
   const status = computeRateLimitStatus(attempts, config, now);
 
   if (status.allowed) {
-    const updatedAttempts = [...attempts, now];
-    writeLogFile(updatedAttempts, now);
-    return computeRateLimitStatus(updatedAttempts, config, now);
+    await sql`INSERT INTO send_attempts (sent_at) VALUES (to_timestamp(${now / 1000}))`;
+    return computeRateLimitStatus([...attempts, now], config, now);
   }
 
   return status;

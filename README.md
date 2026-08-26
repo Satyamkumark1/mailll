@@ -14,7 +14,7 @@ The app is a single six-stage pipeline:
 | **2. Validate** | Every row runs through three layers: local heuristics (format, disposable-domain list, spam-trap and role-based patterns) → live MX + SMTP mailbox check with catch-all detection → a Groq AI pass that confirms or overturns the combined verdict. Can be skipped entirely if you'd rather trust your list as-is. |
 | **3. Results** | Filter by valid/invalid/flagged, search, bulk-approve flagged or invalid rows, override any single verdict, export as CSV. |
 | **4. Draft** | Groq writes a personalized subject + opening hook per valid contact from your pitch, proof points, CTA, and tone — or supply your own hook text to skip AI generation entirely and use the exact same line for everyone. Review and edit each draft in a focused per-recipient editor before sending. |
-| **5. Send** | Paced sending straight from your own SMTP account, with a randomized delay between sends so it doesn't look like a bot blast. Cancel mid-run without losing what's already sent. Outgoing mail includes a styled HTML signature (with your logo) alongside the plain-text version. |
+| **5. Send** | Two modes: send now (paced, randomized delay, cancel mid-run — but stops if you close the tab), or schedule a background campaign that spreads sends evenly across a duration you pick and keeps sending server-side even if you close the browser. Outgoing mail includes a styled HTML signature (with your logo) alongside the plain-text version. |
 | **6. Export** | Download validation results (full or valid-only) and generated drafts (CSV or a single readable text file) at any point. |
 
 ### The validation pipeline in more detail
@@ -47,6 +47,8 @@ Create `.env.local` in the project root:
 | `EMAIL_PASSWORD` | Yes (to send) | SMTP password (e.g. an app password). |
 | `EMAIL_HOST` | No | SMTP host. Defaults to Hostinger (`smtp.hostinger.com`). |
 | `EMAIL_PORT` | No | SMTP port. Defaults to `465` (SSL). |
+| `DATABASE_URL` | Yes (to send) | Postgres connection string. Backs the send-rate limiter (so the 35/hr + 150/day caps hold across serverless invocations) and background send campaigns. |
+| `CRON_SECRET` | Only for background campaigns | Shared secret required by `/api/cron/tick`. |
 | `ABSTRACT_API_KEY` | No | Enables deep mailbox verification via Abstract API instead of raw SMTP. |
 | `VERIFIER_SERVICE_URL` | No | URL of a self-hosted `verifier-service/` instance, for deep verification when deployed somewhere that blocks port 25. |
 | `VERIFIER_SHARED_SECRET` | No | Bearer token securing requests to `VERIFIER_SERVICE_URL`. |
@@ -54,6 +56,17 @@ Create `.env.local` in the project root:
 Without a Groq key, validation and AI-drafted hooks won't run — but you can still generate drafts by supplying your own custom hook text, which skips the AI call entirely.
 
 Without `ABSTRACT_API_KEY` or `VERIFIER_SERVICE_URL`, deep mailbox verification runs in-process — fine locally, but it will silently fall back to heuristic-only results once deployed to a platform that blocks port 25 (Vercel included).
+
+## Background send campaigns (survive closing the browser)
+
+By default, "Send" is a pacing loop that runs in your browser tab — close it and the run stops. For large lists, use **Schedule background campaign** instead: pick a total duration (e.g. "send 400 emails over 12 hours"), and the sends keep going on the server, still capped at 35/hr and 150/day, until done — you can close the tab or shut your laptop.
+
+This needs two one-time setup steps, since Vercel's free (Hobby) plan can't run its own cron more than once a day:
+
+1. **Add a Postgres database** — the easiest way is the [Neon](https://neon.tech) integration from the Vercel Marketplace (Storage tab in your Vercel project), which sets `DATABASE_URL` for you. Then run [`lib/schema.sql`](lib/schema.sql) once via the Neon SQL console to create the required tables.
+2. **Register an external cron** — generate a random string for `CRON_SECRET` and set it in your environment, then point a free service like [cron-job.org](https://cron-job.org) at `https://<your-app>.vercel.app/api/cron/tick?secret=<CRON_SECRET>` on a 1-minute interval. This is what actually drives sending — nothing sends without it running.
+
+Once both are set, "Schedule background campaign" appears usable in the Send stage.
 
 ## Commands
 
@@ -78,7 +91,7 @@ This installs Node/pm2/Caddy, builds and starts the verifier under pm2 (survives
 
 ## Tech stack
 
-Next.js 16 (App Router, Turbopack) · React 19 · TypeScript · Tailwind CSS v4 · Zustand (client state, no persistence — a refresh clears the pipeline by design) · Groq (Llama 3.1) for AI validation and drafting · Nodemailer for sending · Papaparse for CSV parsing.
+Next.js 16 (App Router, Turbopack) · React 19 · TypeScript · Tailwind CSS v4 · Zustand (client state, no persistence — a refresh clears the pipeline by design; the one exception is an active background campaign's id, kept in `localStorage` so its progress panel survives a refresh) · Postgres (Neon) for the send-rate limiter and background campaigns · Groq (Llama 3.1) for AI validation and drafting · Nodemailer for sending · Papaparse for CSV parsing.
 ## Deploying
 
 Deploy the Next.js app to [Vercel](https://vercel.com) as usual, with the environment variables above set in the project settings. Deploy `verifier-service/` separately (see above) only if you need deep verification without Abstract API.

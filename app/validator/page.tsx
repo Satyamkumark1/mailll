@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { Icon } from "@/components/icon";
 import { Logo } from "@/components/logo";
+import { cancelBackgroundCampaign, createBackgroundCampaign, getCampaignStatus, type CampaignView } from "@/lib/campaign-client";
 import { generateDrafts } from "@/lib/draft-generator";
 import { getSendRateStatus, sendDraftsPaced } from "@/lib/email-sender";
 import { buildSignatureHtml } from "@/lib/email-signature";
@@ -35,6 +36,9 @@ const SEND_STATUS_STYLES: Record<SendStatus, string> = {
   failed: "bg-red-500/10 text-red-400 border border-red-500/20",
 };
 
+const CAMPAIGN_ID_STORAGE_KEY = "elevique_active_campaign_id";
+const CAMPAIGN_POLL_MS = 20_000;
+
 type PendingDraftAction = {
   description: string;
   run: () => void;
@@ -45,10 +49,10 @@ export default function Home() {
   const {
     activeTab, emails, results, isValidating, progress, error,
     drafts, isDrafting, draftProgress, draftError, outreachConfig,
-    sendResults, isSending, sendProgress, rateLimitStatus, sendBlockedReason, sendAutoResumeCountdown,
+    sendResults, isSending, sendProgress, rateLimitStatus, sendBlockedReason, sendAutoResumeCountdown, activeCampaignId,
     setActiveTab, setEmails, setValidating, setProgress, appendResults, markResultValid, markAllFlaggedValid, markAllInvalidValid, setError, reset,
     setOutreachConfig, setDrafting, setDraftProgress, appendDrafts, setDraftError, clearDrafts, updateDraft,
-    setSending, setSendProgress, appendSendResults, clearSendResults, setRateLimitStatus, setSendBlockedReason, setSendAutoResumeCountdown,
+    setSending, setSendProgress, appendSendResults, clearSendResults, setRateLimitStatus, setSendBlockedReason, setSendAutoResumeCountdown, setActiveCampaignId,
   } = store;
 
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -61,6 +65,11 @@ export default function Home() {
   const [copiedAllDrafts, setCopiedAllDrafts] = useState(false);
   const [pacing, setPacing] = useState<PacingKey>("cautious");
   const cancelSendRef = useRef(false);
+  const [sendMode, setSendMode] = useState<"now" | "schedule">("now");
+  const [durationHours, setDurationHours] = useState<number>(12);
+  const [campaign, setCampaign] = useState<CampaignView | null>(null);
+  const [campaignError, setCampaignError] = useState<string | null>(null);
+  const [isSchedulingCampaign, setIsSchedulingCampaign] = useState(false);
   const [singleEmail, setSingleEmail] = useState("");
   const [singleResult, setSingleResult] = useState<EmailResult | null>(null);
   const [isCheckingSingle, setIsCheckingSingle] = useState(false);
@@ -318,6 +327,77 @@ export default function Home() {
       getSendRateStatus().then(setRateLimitStatus).catch(() => {});
     }
   }, [activeTab, setRateLimitStatus]);
+
+  // Rehydrate an in-progress background campaign on load/refresh — the send
+  // loop itself runs server-side via cron, this just restores the id so the
+  // progress panel can find it again after the tab was closed and reopened.
+  useEffect(() => {
+    const savedId = window.localStorage.getItem(CAMPAIGN_ID_STORAGE_KEY);
+    if (savedId) setActiveCampaignId(savedId);
+  }, [setActiveCampaignId]);
+
+  const refreshCampaign = useCallback(async (id: string) => {
+    try {
+      const view = await getCampaignStatus(id);
+      setCampaign(view);
+      setCampaignError(null);
+    } catch (err) {
+      setCampaignError(err instanceof Error ? err.message : "Failed to load campaign status");
+    }
+  }, []);
+
+  useEffect(() => {
+    // campaign state is cleared imperatively wherever activeCampaignId is
+    // cleared (see dismissCampaign) — nothing to reset here.
+    if (!activeCampaignId) return;
+    const load = () =>
+      getCampaignStatus(activeCampaignId)
+        .then(setCampaign)
+        .catch((err) => setCampaignError(err instanceof Error ? err.message : "Failed to load campaign status"));
+    load();
+    const interval = setInterval(load, CAMPAIGN_POLL_MS);
+    return () => clearInterval(interval);
+  }, [activeCampaignId]);
+
+  const minCampaignHours = rateLimitStatus ? Math.ceil(drafts.length / rateLimitStatus.hourly.cap) || 1 : 1;
+
+  const scheduleCampaign = useCallback(async () => {
+    const confirmed = window.confirm(
+      `This will schedule ${drafts.length} real email(s) to send from your Gmail account over the next ${durationHours} hour(s), ` +
+        `continuing on the server even if you close this tab. This cannot be undone once sent. Continue?`
+    );
+    if (!confirmed) return;
+
+    setIsSchedulingCampaign(true);
+    setCampaignError(null);
+    try {
+      const { id } = await createBackgroundCampaign(drafts, outreachConfig, durationHours);
+      window.localStorage.setItem(CAMPAIGN_ID_STORAGE_KEY, id);
+      setActiveCampaignId(id);
+      await refreshCampaign(id);
+    } catch (err) {
+      setCampaignError(err instanceof Error ? err.message : "Failed to schedule campaign");
+    } finally {
+      setIsSchedulingCampaign(false);
+    }
+  }, [drafts, outreachConfig, durationHours, setActiveCampaignId, refreshCampaign]);
+
+  const cancelCampaign = useCallback(async () => {
+    if (!activeCampaignId) return;
+    if (!window.confirm("Cancel this background campaign? Emails already sent cannot be recalled.")) return;
+    try {
+      await cancelBackgroundCampaign(activeCampaignId);
+      await refreshCampaign(activeCampaignId);
+    } catch (err) {
+      setCampaignError(err instanceof Error ? err.message : "Failed to cancel campaign");
+    }
+  }, [activeCampaignId, refreshCampaign]);
+
+  const dismissCampaign = useCallback(() => {
+    window.localStorage.removeItem(CAMPAIGN_ID_STORAGE_KEY);
+    setActiveCampaignId(null);
+    setCampaign(null);
+  }, [setActiveCampaignId]);
 
   const startSend = useCallback(async () => {
     const { minSec, maxSec } = PACING_PRESETS[pacing];
@@ -1525,6 +1605,111 @@ export default function Home() {
                         </div>
                       )}
 
+                      {campaign && (
+                        <div className="rounded-xl border border-primary/30 bg-primary/5 p-lg shadow-sm space-y-md">
+                          <div className="flex items-center justify-between">
+                            <p className="flex items-center gap-sm text-body-sm font-bold text-primary">
+                              <Icon name="cloud_sync" className="text-[20px]" />
+                              Background campaign {campaign.status === "running" ? "running on the server" : campaign.status}
+                            </p>
+                            {(campaign.status === "completed" || campaign.status === "canceled") && (
+                              <button onClick={dismissCampaign} className="text-xs font-bold text-on-surface-variant hover:text-on-surface cursor-pointer">
+                                Dismiss
+                              </button>
+                            )}
+                          </div>
+                          <p className="text-xs text-on-surface-variant">
+                            {campaign.status === "running"
+                              ? "You can close this tab — sending continues on the server until the window ends."
+                              : `Finished ${new Date(campaign.windowEnd).toLocaleString()}.`}
+                          </p>
+                          <div>
+                            <div className="mb-2 flex justify-between text-xs font-mono text-primary font-bold">
+                              <span>{campaign.sentCount + campaign.failedCount} / {campaign.totalCount} processed</span>
+                              <span>{campaign.failedCount > 0 ? `${campaign.failedCount} failed` : ""}</span>
+                            </div>
+                            <div className="h-2 w-full bg-surface-container rounded-full overflow-hidden">
+                              <motion.div
+                                className="h-full bg-primary"
+                                animate={{
+                                  width: campaign.totalCount ? `${((campaign.sentCount + campaign.failedCount) / campaign.totalCount) * 100}%` : "0%",
+                                }}
+                                transition={{ duration: 0.2 }}
+                              />
+                            </div>
+                          </div>
+                          {campaign.status === "running" && (
+                            <button
+                              onClick={cancelCampaign}
+                              className="rounded-lg border border-outline bg-surface-container-low px-md py-sm text-label-md font-bold text-on-surface transition-colors hover:bg-surface-container cursor-pointer"
+                            >
+                              Cancel campaign
+                            </button>
+                          )}
+                        </div>
+                      )}
+
+                      {campaignError && (
+                        <div className="flex items-start gap-sm rounded-xl border border-red-500/20 bg-red-500/10 px-md py-sm text-body-sm text-red-400">
+                          <Icon name="error" className="text-[18px]" />
+                          <span>{campaignError}</span>
+                        </div>
+                      )}
+
+                      <div className="flex flex-wrap gap-xs">
+                        {(["now", "schedule"] as const).map((mode) => (
+                          <button
+                            key={mode}
+                            onClick={() => setSendMode(mode)}
+                            disabled={isSending}
+                            className={cn(
+                              "rounded-lg px-md py-sm text-xs font-bold uppercase transition-all border cursor-pointer",
+                              sendMode === mode
+                                ? "bg-primary/10 border-primary text-primary"
+                                : "bg-surface border-outline text-on-surface-variant hover:border-primary"
+                            )}
+                          >
+                            {mode === "now" ? "Send now (keep tab open)" : "Schedule background campaign"}
+                          </button>
+                        ))}
+                      </div>
+
+                      {sendMode === "schedule" ? (
+                        <div className="rounded-xl border border-outline bg-surface p-lg shadow-sm space-y-md">
+                          <p className="flex items-center gap-sm text-body-sm text-on-surface-variant font-semibold">
+                            <Icon name="lock" className="text-[20px] text-primary" />
+                            Requires <code className="font-mono text-xs bg-surface-container px-1.5 py-0.5 rounded font-bold">EMAIL_USER</code>,{" "}
+                            <code className="font-mono text-xs bg-surface-container px-1.5 py-0.5 rounded font-bold">EMAIL_PASSWORD</code>, and{" "}
+                            <code className="font-mono text-xs bg-surface-container px-1.5 py-0.5 rounded font-bold">DATABASE_URL</code> configured server-side, plus an external cron pinging{" "}
+                            <code className="font-mono text-xs bg-surface-container px-1.5 py-0.5 rounded font-bold">/api/cron/tick</code> every minute.
+                          </p>
+                          <div className="pt-sm border-t border-outline/50">
+                            <span className="text-[10px] font-bold text-on-surface-variant uppercase tracking-wider">Spread sends over</span>
+                            <div className="mt-sm flex items-center gap-sm">
+                              <input
+                                type="number"
+                                min={minCampaignHours}
+                                value={durationHours}
+                                onChange={(e) => setDurationHours(Math.max(minCampaignHours, Number(e.target.value) || minCampaignHours))}
+                                disabled={isSchedulingCampaign}
+                                className="w-24 rounded-lg border border-outline bg-surface-container-low px-md py-sm text-body-sm text-on-surface font-mono"
+                              />
+                              <span className="text-body-sm text-on-surface-variant">hours (minimum {minCampaignHours} for {drafts.length} emails at the hourly cap)</span>
+                            </div>
+                            <p className="mt-sm text-xs text-on-surface-variant font-medium">
+                              Sends are spaced evenly across the window. If the hourly/daily cap is hit, remaining emails wait for the next opening rather than being dropped.
+                            </p>
+                          </div>
+                          <button
+                            onClick={scheduleCampaign}
+                            disabled={isSchedulingCampaign || drafts.length === 0 || draftsStale || (campaign?.status === "running")}
+                            className="flex items-center gap-sm rounded-lg bg-primary px-lg py-md text-label-md font-extrabold text-on-primary shadow-lg shadow-primary/20 transition-all hover:scale-[1.02] active:scale-95 disabled:opacity-50 cursor-pointer"
+                          >
+                            <Icon name="schedule_send" className="text-[18px]" />
+                            {isSchedulingCampaign ? "Scheduling..." : `Schedule ${drafts.length} email(s) over ${durationHours}h`}
+                          </button>
+                        </div>
+                      ) : (
                       <div className="rounded-xl border border-outline bg-surface p-lg shadow-sm space-y-md">
                         <p className="flex items-center gap-sm text-body-sm text-on-surface-variant font-semibold">
                           <Icon name="lock" className="text-[20px] text-primary" />
@@ -1620,6 +1805,7 @@ export default function Home() {
                           )}
                         </div>
                       </div>
+                      )}
 
                       {/* Display Paced Send Logs */}
                       {sendResults.length > 0 && (

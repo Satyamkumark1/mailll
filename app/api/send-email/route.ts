@@ -1,13 +1,10 @@
-import nodemailer from "nodemailer";
-import path from "node:path";
-import { LOGO_CID } from "@/lib/email-signature";
-import { ELEVIQUE_OUTREACH_CONFIG } from "@/lib/store";
+import { sendMailDirect } from "@/lib/send-mail";
 import { peekRateLimitStatus, reserveSendSlot } from "@/lib/send-rate-limiter";
 
 export const runtime = "nodejs";
 
 export async function GET() {
-  return Response.json(peekRateLimitStatus());
+  return Response.json(await peekRateLimitStatus());
 }
 
 export async function POST(request: Request) {
@@ -25,7 +22,7 @@ export async function POST(request: Request) {
     );
   }
 
-  const rateLimit = reserveSendSlot();
+  const rateLimit = await reserveSendSlot();
   if (!rateLimit.allowed) {
     let errorMsg = `Send rate limit exceeded. Retry after ${rateLimit.retryAfterSeconds} seconds.`;
     if (rateLimit.hourly.used >= rateLimit.hourly.cap) {
@@ -49,32 +46,8 @@ export async function POST(request: Request) {
     );
   }
 
-  const transporter = nodemailer.createTransport({
-    host: process.env.EMAIL_HOST || "smtp.hostinger.com",
-    port: Number(process.env.EMAIL_PORT) || 465,
-    secure: true, // port 465 = SSL
-    auth: { user, pass },
-  });
-
   try {
-    await transporter.sendMail({
-      from: `"${ELEVIQUE_OUTREACH_CONFIG.senderName}" <${user}>`,
-      to,
-      subject,
-      text: body,
-      ...(html
-        ? {
-            html,
-            attachments: [
-              {
-                filename: "elevique-logo.png",
-                path: path.join(process.cwd(), "public", "elevique-logo.png"),
-                cid: LOGO_CID,
-              },
-            ],
-          }
-        : {}),
-    });
+    await sendMailDirect({ to, subject, text: body, html });
     return Response.json({ success: true, rateLimit });
   } catch (err) {
     return Response.json(
@@ -83,4 +56,3 @@ export async function POST(request: Request) {
     );
   }
 }
-

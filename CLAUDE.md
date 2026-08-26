@@ -16,7 +16,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Environment
 
-`.env.local` (gitignored) needs `NEXT_PUBLIC_GROQ_API_KEY` and `EMAIL_USER`/`EMAIL_PASSWORD`/`EMAIL_HOST`/`EMAIL_PORT` (SMTP send credentials). Optional, for deep email verification off Vercel: `ABSTRACT_API_KEY`, `VERIFIER_SERVICE_URL`, `VERIFIER_SHARED_SECRET` — see "Deep verification" below.
+`.env.local` (gitignored) needs `NEXT_PUBLIC_GROQ_API_KEY`, `EMAIL_USER`/`EMAIL_PASSWORD`/`EMAIL_HOST`/`EMAIL_PORT` (SMTP send credentials), and `DATABASE_URL` (Postgres — backs the send-rate limiter and background campaigns; required to send any email at all, not just scheduled ones). Optional, for deep email verification off Vercel: `ABSTRACT_API_KEY`, `VERIFIER_SERVICE_URL`, `VERIFIER_SHARED_SECRET` — see "Deep verification" below. `CRON_SECRET` is required only if using background send campaigns — see below.
 
 ## Architecture
 
@@ -62,7 +62,17 @@ Drafts are plain text everywhere in the app (editor, CSV/TXT export, copy-to-cli
 
 ### Sending (`lib/email-sender.ts` + `app/api/send-email/route.ts`)
 
-`sendDraftsPaced()` sends one at a time with a randomized delay between sends (to avoid looking like a bot blast to spam filters), checking a `shouldCancel()` callback between sends so a "Stop" button can halt mid-run without losing already-recorded results. The route sends via `nodemailer` against `EMAIL_HOST`/`EMAIL_USER`/`EMAIL_PASSWORD` (defaults to Hostinger on port 465), passing both `text` and `html` as a multipart message.
+`sendDraftsPaced()` sends one at a time with a randomized delay between sends (to avoid looking like a bot blast to spam filters), checking a `shouldCancel()` callback between sends so a "Stop" button can halt mid-run without losing already-recorded results. The route sends via `nodemailer` against `EMAIL_HOST`/`EMAIL_USER`/`EMAIL_PASSWORD` (defaults to Hostinger on port 465), passing both `text` and `html` as a multipart message. This whole path is client-driven — the pacing loop is a `setTimeout` loop in the browser tab, so it stops if the tab closes. Nodemailer transport setup and the CID logo attachment are shared with the cron worker below via `lib/send-mail.ts`'s `sendMailDirect()`.
+
+### Send-rate limiting is DB-backed, not file-based (`lib/send-rate-limiter.ts`)
+
+`computeRateLimitStatus()` is a pure function (unit-tested in `lib/__tests__/send-rate-limiter.test.ts`) — don't touch its signature lightly. Around it, `peekRateLimitStatus()`/`reserveSendSlot()` read/write a `send_attempts` table via `lib/db.ts` (Neon Postgres, `DATABASE_URL`) rather than a local file, since Vercel's serverless filesystem isn't reliably persistent across invocations — both the immediate-send route and the background-campaign cron worker share this one durable counter so the 35/hr + 150/day caps hold regardless of which path is sending.
+
+### Background send campaigns survive closing the browser (`lib/campaigns.ts` + `app/api/campaigns/*` + `app/api/cron/tick`)
+
+The "Schedule background campaign" mode in the Send stage solves a real limitation of the client-driven pacing loop above: if you have hundreds of drafts, closing the tab (or the laptop sleeping) kills the send. Instead, scheduling a campaign snapshots the drafts + pre-rendered HTML into Postgres (`campaigns`/`campaign_emails` tables — see `lib/schema.sql`, run once via the Neon SQL console) with a `scheduled_at` per email computed by `computeScheduledTimes()` (evenly spaced across the user-chosen duration, with jitter — pure function, unit-tested in `lib/__tests__/campaigns.test.ts`).
+
+Nothing sends anything until something calls `POST /api/cron/tick` (guarded by `?secret=` or `Authorization: Bearer` matching `CRON_SECRET`). **Vercel Cron only fires daily on the Hobby plan**, which isn't frequent enough for a 35/hr drip — so this app relies on an external free pinger (e.g. cron-job.org) hitting that endpoint about once a minute. Each tick claims a handful of due rows (`claimDueEmails`, `FOR UPDATE SKIP LOCKED` so overlapping ticks can't double-send), checks the shared rate limiter, sends via `sendMailDirect()`, and records the result — a row that can't get a rate-limit slot is released back to `pending` and retried on a later tick rather than dropped, so `scheduled_at` is a pacing target, not a hard deadline. The browser side only ever needs the campaign `id` (kept in `localStorage`) to poll `GET /api/campaigns/:id` for progress; the send loop itself has no dependency on any browser being open.
 
 ### Tailwind v4 theme gotcha (`app/globals.css`)
 
