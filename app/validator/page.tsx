@@ -5,6 +5,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { Icon } from "@/components/icon";
 import { Logo } from "@/components/logo";
 import { cancelBackgroundCampaign, createBackgroundCampaign, getCampaignStatus, type CampaignView } from "@/lib/campaign-client";
+import { computeMinDurationHours, formatDurationHours } from "@/lib/campaign-schedule";
 import { generateDrafts } from "@/lib/draft-generator";
 import { getSendRateStatus, sendDraftsPaced } from "@/lib/email-sender";
 import { buildSignatureHtml } from "@/lib/email-signature";
@@ -66,7 +67,8 @@ export default function Home() {
   const [pacing, setPacing] = useState<PacingKey>("cautious");
   const cancelSendRef = useRef(false);
   const [sendMode, setSendMode] = useState<"now" | "schedule">("now");
-  const [durationHours, setDurationHours] = useState<number>(12);
+  const [durationHours, setDurationHours] = useState<number | null>(null);
+  const [durationTouched, setDurationTouched] = useState(false);
   const [campaign, setCampaign] = useState<CampaignView | null>(null);
   const [campaignError, setCampaignError] = useState<string | null>(null);
   const [isSchedulingCampaign, setIsSchedulingCampaign] = useState(false);
@@ -359,11 +361,17 @@ export default function Home() {
     return () => clearInterval(interval);
   }, [activeCampaignId]);
 
-  const minCampaignHours = rateLimitStatus ? Math.ceil(drafts.length / rateLimitStatus.hourly.cap) || 1 : 1;
+  // Small batches shouldn't be forced into a long window just because a
+  // duration was picked for a much bigger list — recommend (and default to)
+  // the shortest duration that still keeps a human-ish pace and respects
+  // the hourly cap, and only override it once the user actually edits the
+  // field. See lib/campaign-schedule.ts.
+  const minCampaignHours = computeMinDurationHours(drafts.length, rateLimitStatus?.hourly.cap ?? 35);
+  const effectiveDurationHours = durationTouched && durationHours !== null ? durationHours : minCampaignHours;
 
   const scheduleCampaign = useCallback(async () => {
     const confirmed = window.confirm(
-      `This will schedule ${drafts.length} real email(s) to send from your Gmail account over the next ${durationHours} hour(s), ` +
+      `This will schedule ${drafts.length} real email(s) to send from your Gmail account over the next ${formatDurationHours(effectiveDurationHours)}, ` +
         `continuing on the server even if you close this tab. This cannot be undone once sent. Continue?`
     );
     if (!confirmed) return;
@@ -371,7 +379,7 @@ export default function Home() {
     setIsSchedulingCampaign(true);
     setCampaignError(null);
     try {
-      const { id } = await createBackgroundCampaign(drafts, outreachConfig, durationHours);
+      const { id } = await createBackgroundCampaign(drafts, outreachConfig, effectiveDurationHours);
       window.localStorage.setItem(CAMPAIGN_ID_STORAGE_KEY, id);
       setActiveCampaignId(id);
       await refreshCampaign(id);
@@ -380,7 +388,7 @@ export default function Home() {
     } finally {
       setIsSchedulingCampaign(false);
     }
-  }, [drafts, outreachConfig, durationHours, setActiveCampaignId, refreshCampaign]);
+  }, [drafts, outreachConfig, effectiveDurationHours, setActiveCampaignId, refreshCampaign]);
 
   const cancelCampaign = useCallback(async () => {
     if (!activeCampaignId) return;
@@ -1689,15 +1697,19 @@ export default function Home() {
                               <input
                                 type="number"
                                 min={minCampaignHours}
-                                value={durationHours}
-                                onChange={(e) => setDurationHours(Math.max(minCampaignHours, Number(e.target.value) || minCampaignHours))}
+                                step="0.01"
+                                value={Math.round(effectiveDurationHours * 100) / 100}
+                                onChange={(e) => {
+                                  setDurationHours(Math.max(minCampaignHours, Number(e.target.value) || minCampaignHours));
+                                  setDurationTouched(true);
+                                }}
                                 disabled={isSchedulingCampaign}
-                                className="w-24 rounded-lg border border-outline bg-surface-container-low px-md py-sm text-body-sm text-on-surface font-mono"
+                                className="w-28 rounded-lg border border-outline bg-surface-container-low px-md py-sm text-body-sm text-on-surface font-mono"
                               />
-                              <span className="text-body-sm text-on-surface-variant">hours (minimum {minCampaignHours} for {drafts.length} emails at the hourly cap)</span>
+                              <span className="text-body-sm text-on-surface-variant">hours (minimum {formatDurationHours(minCampaignHours)} for {drafts.length} email(s))</span>
                             </div>
                             <p className="mt-sm text-xs text-on-surface-variant font-medium">
-                              Sends are spaced evenly across the window. If the hourly/daily cap is hit, remaining emails wait for the next opening rather than being dropped.
+                              A small batch defaults to a quick, human-paced send rather than being stretched out — the minimum above already keeps a safe gap between sends. Sends are spaced evenly across whatever window you pick; if the hourly/daily cap is hit, remaining emails wait for the next opening rather than being dropped.
                             </p>
                           </div>
                           <button
@@ -1706,7 +1718,7 @@ export default function Home() {
                             className="flex items-center gap-sm rounded-lg bg-primary px-lg py-md text-label-md font-extrabold text-on-primary shadow-lg shadow-primary/20 transition-all hover:scale-[1.02] active:scale-95 disabled:opacity-50 cursor-pointer"
                           >
                             <Icon name="schedule_send" className="text-[18px]" />
-                            {isSchedulingCampaign ? "Scheduling..." : `Schedule ${drafts.length} email(s) over ${durationHours}h`}
+                            {isSchedulingCampaign ? "Scheduling..." : `Schedule ${drafts.length} email(s) over ${formatDurationHours(effectiveDurationHours)}`}
                           </button>
                         </div>
                       ) : (

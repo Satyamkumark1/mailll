@@ -1,3 +1,4 @@
+import { computeMinDurationHours, formatDurationHours } from "@/lib/campaign-schedule";
 import { createCampaign } from "@/lib/campaigns";
 import { getRateLimitConfig } from "@/lib/send-rate-limiter";
 import type { DraftResult, OutreachConfig } from "@/lib/store";
@@ -33,11 +34,11 @@ export async function POST(request: Request) {
   }
 
   const { hourlyCap } = getRateLimitConfig();
-  const minHours = Math.ceil(drafts.length / hourlyCap);
+  const minHours = computeMinDurationHours(drafts.length, hourlyCap);
   if (durationHours < minHours) {
     return Response.json(
       {
-        error: `${drafts.length} emails at a ${hourlyCap}/hr cap need at least ${minHours} hour(s).`,
+        error: `${drafts.length} email(s) need at least ${formatDurationHours(minHours)} to stay paced safely.`,
         minHours,
       },
       { status: 400 }

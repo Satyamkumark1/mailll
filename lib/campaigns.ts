@@ -1,4 +1,5 @@
 import { sql } from "./db.ts";
+import { computeScheduledTimes } from "./campaign-schedule.ts";
 import { buildEmailHtml, LOGO_CID } from "./email-signature.ts";
 import type { DraftResult, OutreachConfig } from "./store";
 
@@ -22,31 +23,6 @@ export interface CampaignSummary {
   sentCount: number;
   failedCount: number;
   emails: CampaignEmailSummary[];
-}
-
-// Evenly spaces `count` timestamps across [windowStart, windowEnd] with
-// jitter of up to +/-20% of the interval, clamped inside the window so
-// sending doesn't look perfectly robotic but still respects the user's
-// chosen duration. Pure function — see lib/__tests__/campaigns.test.ts.
-export function computeScheduledTimes(count: number, windowStart: Date, windowEnd: Date): Date[] {
-  if (count <= 0) return [];
-  const startMs = windowStart.getTime();
-  const endMs = windowEnd.getTime();
-  const span = Math.max(0, endMs - startMs);
-  const interval = count > 1 ? span / count : span / 2;
-  const jitterRange = interval * 0.2;
-
-  const times: Date[] = [];
-  for (let i = 0; i < count; i++) {
-    const base = startMs + interval * (i + 0.5);
-    const jitter = (Math.random() * 2 - 1) * jitterRange;
-    const clamped = Math.min(endMs, Math.max(startMs, base + jitter));
-    times.push(new Date(clamped));
-  }
-  // Jitter can't invert order given interval-sized slots and a 20% jitter cap,
-  // but sort defensively since callers rely on scheduled_at ordering.
-  times.sort((a, b) => a.getTime() - b.getTime());
-  return times;
 }
 
 export interface CreateCampaignInput {

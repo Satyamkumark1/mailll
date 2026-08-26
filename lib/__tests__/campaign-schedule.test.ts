@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { computeScheduledTimes } from "../campaigns.ts";
+import { computeMinDurationHours, computeScheduledTimes, formatDurationHours } from "../campaign-schedule.ts";
 
 test("computeScheduledTimes spaces times evenly across the window", () => {
   const start = new Date("2026-01-01T00:00:00Z");
@@ -34,4 +34,32 @@ test("computeScheduledTimes handles zero and one email", () => {
   assert.equal(single.length, 1);
   assert.ok(single[0].getTime() >= start.getTime());
   assert.ok(single[0].getTime() <= end.getTime());
+});
+
+test("computeMinDurationHours stays small for a couple of emails", () => {
+  // 2 emails at a 35/hr cap shouldn't be forced into a full 1-hour window —
+  // this is the behavior the user explicitly asked for ("if the mails are
+  // less it should go quick").
+  const minHours = computeMinDurationHours(2, 35);
+  assert.ok(minHours < 1, `expected under an hour, got ${minHours}`);
+  assert.ok(minHours > 0);
+});
+
+test("computeMinDurationHours is driven by the cap once count approaches it", () => {
+  const minHours = computeMinDurationHours(400, 35);
+  assert.ok(minHours >= 400 / 35 - 0.001, "must be at least the cap-driven minimum");
+});
+
+test("computeMinDurationHours is zero for zero emails", () => {
+  assert.equal(computeMinDurationHours(0, 35), 0);
+});
+
+test("formatDurationHours renders sub-hour durations as minutes", () => {
+  assert.equal(formatDurationHours(0.05), "3 minutes");
+  assert.equal(formatDurationHours(1 / 60), "1 minute");
+});
+
+test("formatDurationHours renders hour-plus durations as hours", () => {
+  assert.equal(formatDurationHours(1), "1 hour");
+  assert.equal(formatDurationHours(11.43), "11.5 hours");
 });
