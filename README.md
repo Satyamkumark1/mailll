@@ -6,7 +6,7 @@ Upload a CSV → clean it with real MX/SMTP mailbox checks (not just format rege
 
 ## How it works
 
-The app is a single six-stage pipeline:
+The app is a single seven-stage pipeline:
 
 | Stage | What happens |
 | --- | --- |
@@ -14,8 +14,9 @@ The app is a single six-stage pipeline:
 | **2. Validate** | Every row runs through three layers: local heuristics (format, disposable-domain list, spam-trap and role-based patterns) → live MX + SMTP mailbox check with catch-all detection → a Groq AI pass that confirms or overturns the combined verdict. Can be skipped entirely if you'd rather trust your list as-is. |
 | **3. Results** | Filter by valid/invalid/flagged, search, bulk-approve flagged or invalid rows, override any single verdict, export as CSV. |
 | **4. Draft** | Groq writes a personalized subject + opening hook per valid contact from your pitch, proof points, CTA, and tone — or supply your own hook text to skip AI generation entirely and use the exact same line for everyone. Review and edit each draft in a focused per-recipient editor before sending. |
-| **5. Send** | Two modes: send now (paced, randomized delay, cancel mid-run — but stops if you close the tab), or schedule a background campaign that spreads sends evenly across a duration you pick and keeps sending server-side even if you close the browser. Outgoing mail includes a styled HTML signature (with your logo) alongside the plain-text version. |
+| **5. Send** | Two modes: send now (paced, randomized delay, cancel mid-run — but stops if you close the tab), or schedule a background campaign — pick "start now" or a specific future time, and a duration to spread sends across — that keeps sending server-side even if you close the browser. Outgoing mail includes a styled HTML signature (with your logo) alongside the plain-text version. |
 | **6. Export** | Download validation results (full or valid-only) and generated drafts (CSV or a single readable text file) at any point. |
+| **7. History** | Every background campaign ever scheduled, read fresh from the server — so you can check outcomes (including failures) even if you never reopen the tab that started one. |
 
 ### The validation pipeline in more detail
 
@@ -43,23 +44,29 @@ Create `.env.local` in the project root:
 | Variable | Required | Purpose |
 | --- | --- | --- |
 | `NEXT_PUBLIC_GROQ_API_KEY` | Yes | Groq API key — powers the AI validation pass and AI-drafted hooks. |
-| `EMAIL_USER` | Yes (to send) | SMTP username / from-address for sending outreach. |
-| `EMAIL_PASSWORD` | Yes (to send) | SMTP password (e.g. an app password). |
-| `EMAIL_HOST` | No | SMTP host. Defaults to Hostinger (`smtp.hostinger.com`). |
-| `EMAIL_PORT` | No | SMTP port. Defaults to `465` (SSL). |
-| `DATABASE_URL` | Yes (to send) | Postgres connection string. Backs the send-rate limiter (so the 35/hr + 150/day caps hold across serverless invocations) and background send campaigns. |
+| `DATABASE_URL` | Yes (to send) | Postgres connection string. Backs the send-rate limiter, sender settings, and background send campaigns. |
+| `SETTINGS_ENCRYPTION_KEY` | Yes (to send) | 32-byte hex key encrypting the SMTP password stored via the Settings modal. Generate with `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`. |
 | `CRON_SECRET` | Only for background campaigns | Shared secret required by `/api/cron/tick`. |
 | `ABSTRACT_API_KEY` | No | Enables deep mailbox verification via Abstract API instead of raw SMTP. |
 | `VERIFIER_SERVICE_URL` | No | URL of a self-hosted `verifier-service/` instance, for deep verification when deployed somewhere that blocks port 25. |
 | `VERIFIER_SHARED_SECRET` | No | Bearer token securing requests to `VERIFIER_SERVICE_URL`. |
+| `EMAIL_USER`/`EMAIL_PASSWORD`/`EMAIL_HOST`/`EMAIL_PORT`/`EMAIL_HOURLY_CAP`/`EMAIL_DAILY_CAP` | No (legacy) | Only read once, to seed the database the first time sender settings are loaded with no configuration saved yet. The Settings modal (gear icon, top right) is the source of truth after that — see below. |
 
 Without a Groq key, validation and AI-drafted hooks won't run — but you can still generate drafts by supplying your own custom hook text, which skips the AI call entirely.
 
 Without `ABSTRACT_API_KEY` or `VERIFIER_SERVICE_URL`, deep mailbox verification runs in-process — fine locally, but it will silently fall back to heuristic-only results once deployed to a platform that blocks port 25 (Vercel included).
 
+## Sender settings and send limits (Settings modal)
+
+Click the gear icon (top right) to configure the sending account (SMTP host/port/user/password) and hourly/daily send caps — no env vars or redeploys needed. Two guardrails are built in, based on [Zoho's own documented sending limits](https://www.zoho.com/mail/help/adminconsole/rates-and-limits.html) (external sending is reputation-based, dynamically capped at 50-500/hr):
+
+- An hourly cap above **500** is rejected outright — that's Zoho's documented absolute ceiling regardless of reputation.
+- An hourly cap above **50** is accepted but flagged with a warning — safe for an account with an established sending history, risky otherwise.
+- **Warm-up**: when enabled (the default), actual sending starts well below your configured caps and ramps up to them over ~14 days, rather than sending at full volume from day one — this follows Zoho's own advice to ramp volume up gradually instead of bursting, which is exactly what triggers an "Unusual sending activity detected" block. Use **Reset warm-up** in the modal to restart the ramp from the floor after a block clears.
+
 ## Background send campaigns (survive closing the browser)
 
-By default, "Send" is a pacing loop that runs in your browser tab — close it and the run stops. For large lists, use **Schedule background campaign** instead: pick a total duration (e.g. "send 400 emails over 12 hours"), and the sends keep going on the server, still capped at 35/hr and 150/day, until done — you can close the tab or shut your laptop.
+By default, "Send" is a pacing loop that runs in your browser tab — close it and the run stops. For large lists, use **Schedule background campaign** instead: choose to start now or at a specific future time, pick a total duration (e.g. "send 400 emails over 12 hours"), and the sends keep going on the server, still capped by whatever limits are set in Settings, until done — you can close the tab or shut your laptop, even before the scheduled start time arrives.
 
 This needs two one-time setup steps, since Vercel's free (Hobby) plan can't run its own cron more than once a day:
 

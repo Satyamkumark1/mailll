@@ -1,4 +1,5 @@
 import { sql } from "./db.ts";
+import { getEffectiveRateLimitConfig } from "./sender-settings.ts";
 
 export interface RateLimitConfig {
   hourlyCap: number;
@@ -76,11 +77,13 @@ export function computeRateLimitStatus(
   };
 }
 
-export function getRateLimitConfig(): RateLimitConfig {
-  return {
-    hourlyCap: Number(process.env.EMAIL_HOURLY_CAP) || 35,
-    dailyCap: Number(process.env.EMAIL_DAILY_CAP) || 150,
-  };
+// Sourced from the Settings-UI-configured caps (lib/sender-settings.ts),
+// with the warm-up ramp already applied — everything downstream (the rate
+// limiter, campaign duration validation) automatically respects it with no
+// further changes needed.
+export async function getRateLimitConfig(): Promise<RateLimitConfig> {
+  const effective = await getEffectiveRateLimitConfig();
+  return { hourlyCap: effective.hourlyCap, dailyCap: effective.dailyCap };
 }
 
 async function readAttempts(now: number): Promise<number[]> {
@@ -99,13 +102,13 @@ async function readAttempts(now: number): Promise<number[]> {
 
 export async function peekRateLimitStatus(now = Date.now()): Promise<RateLimitStatus> {
   const attempts = await readAttempts(now);
-  const config = getRateLimitConfig();
+  const config = await getRateLimitConfig();
   return computeRateLimitStatus(attempts, config, now);
 }
 
 export async function reserveSendSlot(now = Date.now()): Promise<RateLimitStatus> {
   const attempts = await readAttempts(now);
-  const config = getRateLimitConfig();
+  const config = await getRateLimitConfig();
   const status = computeRateLimitStatus(attempts, config, now);
 
   if (status.allowed) {

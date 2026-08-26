@@ -6,6 +6,7 @@ import { Icon } from "@/components/icon";
 import { Logo } from "@/components/logo";
 import { cancelBackgroundCampaign, createBackgroundCampaign, getCampaignStatus, listCampaigns, type CampaignListView, type CampaignView } from "@/lib/campaign-client";
 import { computeMinDurationHours, formatDurationHours } from "@/lib/campaign-schedule";
+import { getSenderSettingsView, resetWarmupClient, saveSenderSettingsView, type SenderSettingsView } from "@/lib/settings-client";
 import { generateDrafts } from "@/lib/draft-generator";
 import { getSendRateStatus, sendDraftsPaced } from "@/lib/email-sender";
 import { buildSignatureHtml } from "@/lib/email-signature";
@@ -80,6 +81,23 @@ export default function Home() {
   const [isSchedulingCampaign, setIsSchedulingCampaign] = useState(false);
   const [campaignHistory, setCampaignHistory] = useState<CampaignListView[] | null>(null);
   const [historyError, setHistoryError] = useState<string | null>(null);
+  const [startMode, setStartMode] = useState<"now" | "at">("now");
+  const [startAtLocal, setStartAtLocal] = useState("");
+  const [settingsView, setSettingsView] = useState<SenderSettingsView | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsForm, setSettingsForm] = useState({
+    smtpHost: "",
+    smtpPort: 465,
+    smtpUser: "",
+    smtpPassword: "",
+    hourlyCap: 35,
+    dailyCap: 150,
+    warmupEnabled: true,
+  });
+  const [settingsError, setSettingsError] = useState<string | null>(null);
+  const [settingsWarning, setSettingsWarning] = useState<string | null>(null);
+  const [isSavingSettings, setIsSavingSettings] = useState(false);
+  const [isResettingWarmup, setIsResettingWarmup] = useState(false);
   const [singleEmail, setSingleEmail] = useState("");
   const [singleResult, setSingleResult] = useState<EmailResult | null>(null);
   const [isCheckingSingle, setIsCheckingSingle] = useState(false);
@@ -338,6 +356,70 @@ export default function Home() {
     }
   }, [activeTab, setRateLimitStatus]);
 
+  const refreshSettingsView = useCallback(() => {
+    return getSenderSettingsView()
+      .then(setSettingsView)
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    refreshSettingsView();
+  }, [refreshSettingsView]);
+
+  const openSettings = useCallback(() => {
+    if (settingsView) {
+      setSettingsForm({
+        smtpHost: settingsView.smtpHost,
+        smtpPort: settingsView.smtpPort,
+        smtpUser: settingsView.smtpUser,
+        smtpPassword: "",
+        hourlyCap: settingsView.hourlyCap,
+        dailyCap: settingsView.dailyCap,
+        warmupEnabled: settingsView.warmupEnabled,
+      });
+    }
+    setSettingsError(null);
+    setSettingsWarning(null);
+    setSettingsOpen(true);
+  }, [settingsView]);
+
+  const saveSettings = useCallback(async () => {
+    setIsSavingSettings(true);
+    setSettingsError(null);
+    setSettingsWarning(null);
+    try {
+      const { warning } = await saveSenderSettingsView({
+        smtpHost: settingsForm.smtpHost,
+        smtpPort: settingsForm.smtpPort,
+        smtpUser: settingsForm.smtpUser,
+        smtpPassword: settingsForm.smtpPassword || undefined,
+        hourlyCap: settingsForm.hourlyCap,
+        dailyCap: settingsForm.dailyCap,
+        warmupEnabled: settingsForm.warmupEnabled,
+      });
+      setSettingsWarning(warning);
+      await refreshSettingsView();
+      if (!warning) setSettingsOpen(false);
+    } catch (err) {
+      setSettingsError(err instanceof Error ? err.message : "Failed to save settings");
+    } finally {
+      setIsSavingSettings(false);
+    }
+  }, [settingsForm, refreshSettingsView]);
+
+  const handleResetWarmup = useCallback(async () => {
+    if (!window.confirm("Restart the warm-up ramp from the floor? Use this after a Zoho block clears.")) return;
+    setIsResettingWarmup(true);
+    try {
+      await resetWarmupClient();
+      await refreshSettingsView();
+    } catch (err) {
+      setSettingsError(err instanceof Error ? err.message : "Failed to reset warm-up");
+    } finally {
+      setIsResettingWarmup(false);
+    }
+  }, [refreshSettingsView]);
+
   // Rehydrate an in-progress background campaign on load/refresh — the send
   // loop itself runs server-side via cron, this just restores the id so the
   // progress panel can find it again after the tab was closed and reopened.
@@ -377,9 +459,27 @@ export default function Home() {
   const minCampaignHours = computeMinDurationHours(drafts.length, rateLimitStatus?.hourly.cap ?? 35);
   const effectiveDurationHours = durationTouched && durationHours !== null ? durationHours : minCampaignHours;
 
+  // Pure — just checks the picked value parses, no time-dependent
+  // comparison (that happens at submit time in scheduleCampaign, inside an
+  // event handler where calling Date.now() is fine). Memoized so it's a
+  // stable reference across renders where startMode/startAtLocal haven't
+  // changed, keeping scheduleCampaign's own memoization meaningful.
+  const resolvedStartAt = useMemo(
+    () => (startMode === "at" && startAtLocal ? new Date(startAtLocal) : null),
+    [startMode, startAtLocal]
+  );
+  const startAtMissing = startMode === "at" && (!resolvedStartAt || Number.isNaN(resolvedStartAt.getTime()));
+
   const scheduleCampaign = useCallback(async () => {
+    if (startMode === "at" && (!resolvedStartAt || Number.isNaN(resolvedStartAt.getTime()) || resolvedStartAt.getTime() <= Date.now())) {
+      setCampaignError("Pick a start time in the future.");
+      return;
+    }
+
+    const startDescription =
+      startMode === "at" && resolvedStartAt ? `starting at ${resolvedStartAt.toLocaleString()}` : "starting now";
     const confirmed = window.confirm(
-      `This will schedule ${drafts.length} real email(s) to send from your Gmail account over the next ${formatDurationHours(effectiveDurationHours)}, ` +
+      `This will schedule ${drafts.length} real email(s) to send from your Gmail account, ${startDescription}, spread over ${formatDurationHours(effectiveDurationHours)}, ` +
         `continuing on the server even if you close this tab. This cannot be undone once sent. Continue?`
     );
     if (!confirmed) return;
@@ -387,7 +487,12 @@ export default function Home() {
     setIsSchedulingCampaign(true);
     setCampaignError(null);
     try {
-      const { id } = await createBackgroundCampaign(drafts, outreachConfig, effectiveDurationHours);
+      const { id } = await createBackgroundCampaign(
+        drafts,
+        outreachConfig,
+        effectiveDurationHours,
+        resolvedStartAt ? resolvedStartAt.toISOString() : undefined
+      );
       window.localStorage.setItem(CAMPAIGN_ID_STORAGE_KEY, id);
       setActiveCampaignId(id);
       await refreshCampaign(id);
@@ -396,7 +501,7 @@ export default function Home() {
     } finally {
       setIsSchedulingCampaign(false);
     }
-  }, [drafts, outreachConfig, effectiveDurationHours, setActiveCampaignId, refreshCampaign]);
+  }, [drafts, outreachConfig, effectiveDurationHours, startMode, resolvedStartAt, setActiveCampaignId, refreshCampaign]);
 
   const cancelCampaign = useCallback(async () => {
     if (!activeCampaignId) return;
@@ -564,6 +669,44 @@ export default function Home() {
     return results.slice(-5).reverse();
   }, [results]);
 
+  const renderSenderStatus = () => {
+    if (!settingsView) return null;
+    if (!settingsView.configured) {
+      return (
+        <div className="flex items-center justify-between gap-sm rounded-lg border border-amber-500/25 bg-amber-500/10 px-md py-sm text-body-sm text-amber-200">
+          <span className="flex items-center gap-sm">
+            <Icon name="lock" className="text-[18px]" />
+            No sender account configured yet.
+          </span>
+          <button
+            onClick={openSettings}
+            className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-sm py-xs text-xs font-bold text-amber-200 hover:bg-amber-500/20 cursor-pointer"
+          >
+            Open Settings
+          </button>
+        </div>
+      );
+    }
+    return (
+      <p className="flex items-center gap-sm text-body-sm text-on-surface-variant font-semibold">
+        <Icon name="lock" className="text-[20px] text-primary" />
+        Sending as <code className="font-mono text-xs bg-surface-container px-1.5 py-0.5 rounded font-bold">{settingsView.smtpUser}</code>.{" "}
+        <button onClick={openSettings} className="text-primary font-bold hover:underline cursor-pointer">
+          Edit
+        </button>
+      </p>
+    );
+  };
+
+  const renderWarmupNotice = () => {
+    if (!settingsView?.effective.warmupActive) return null;
+    return (
+      <p className="text-xs font-mono text-amber-300 font-medium">
+        Ramping up: {settingsView.effective.hourlyCap}/{settingsView.effective.hourlyTarget} per hour (day {settingsView.effective.warmupDay} of {settingsView.effective.warmupDays})
+      </p>
+    );
+  };
+
   // Pre-attentive shape + color render function for status badges
   const renderStatusBadge = (status: EmailStatus) => {
     switch (status) {
@@ -621,6 +764,14 @@ export default function Home() {
                 Start Over
               </button>
             )}
+
+            <button
+              onClick={openSettings}
+              title="Sender settings"
+              className="flex h-9 w-9 items-center justify-center rounded-lg border border-outline bg-surface-container-low text-on-surface-variant transition-all hover:bg-surface-container hover:text-primary active:scale-95 cursor-pointer shadow-sm"
+            >
+              <Icon name="settings" className="text-[18px]" />
+            </button>
 
             <div className="flex h-8 w-8 items-center justify-center rounded-full bg-primary text-on-primary font-extrabold text-xs shadow-md select-none">
               JD
@@ -1729,13 +1880,45 @@ export default function Home() {
 
                       {sendMode === "schedule" ? (
                         <div className="rounded-xl border border-outline bg-surface p-lg shadow-sm space-y-md">
-                          <p className="flex items-center gap-sm text-body-sm text-on-surface-variant font-semibold">
-                            <Icon name="lock" className="text-[20px] text-primary" />
-                            Requires <code className="font-mono text-xs bg-surface-container px-1.5 py-0.5 rounded font-bold">EMAIL_USER</code>,{" "}
-                            <code className="font-mono text-xs bg-surface-container px-1.5 py-0.5 rounded font-bold">EMAIL_PASSWORD</code>, and{" "}
-                            <code className="font-mono text-xs bg-surface-container px-1.5 py-0.5 rounded font-bold">DATABASE_URL</code> configured server-side, plus an external cron pinging{" "}
+                          {renderSenderStatus()}
+                          <p className="text-xs text-on-surface-variant">
+                            Also requires <code className="font-mono text-xs bg-surface-container px-1.5 py-0.5 rounded font-bold">DATABASE_URL</code> configured server-side, plus an external cron pinging{" "}
                             <code className="font-mono text-xs bg-surface-container px-1.5 py-0.5 rounded font-bold">/api/cron/tick</code> every minute.
                           </p>
+                          <div className="pt-sm border-t border-outline/50">
+                            <span className="text-[10px] font-bold text-on-surface-variant uppercase tracking-wider">Start</span>
+                            <div className="mt-sm flex flex-wrap gap-xs">
+                              {(["now", "at"] as const).map((mode) => (
+                                <button
+                                  key={mode}
+                                  onClick={() => setStartMode(mode)}
+                                  disabled={isSchedulingCampaign}
+                                  className={cn(
+                                    "rounded-lg px-md py-sm text-xs font-bold uppercase transition-all border cursor-pointer",
+                                    startMode === mode
+                                      ? "bg-primary/10 border-primary text-primary"
+                                      : "bg-surface border-outline text-on-surface-variant hover:border-primary"
+                                  )}
+                                >
+                                  {mode === "now" ? "Start now" : "Start at a specific time"}
+                                </button>
+                              ))}
+                            </div>
+                            {startMode === "at" && (
+                              <div className="mt-sm">
+                                <input
+                                  type="datetime-local"
+                                  value={startAtLocal}
+                                  onChange={(e) => setStartAtLocal(e.target.value)}
+                                  disabled={isSchedulingCampaign}
+                                  className="rounded-lg border border-outline bg-surface-container-low px-md py-sm text-body-sm text-on-surface font-mono"
+                                />
+                                <p className="mt-xs text-xs text-on-surface-variant font-medium">
+                                  Must be in the future. This persists on the server — it&apos;ll start at this time even if you close the browser or shut down your laptop before then.
+                                </p>
+                              </div>
+                            )}
+                          </div>
                           <div className="pt-sm border-t border-outline/50">
                             <span className="text-[10px] font-bold text-on-surface-variant uppercase tracking-wider">Spread sends over</span>
                             <div className="mt-sm flex items-center gap-sm">
@@ -1756,10 +1939,11 @@ export default function Home() {
                             <p className="mt-sm text-xs text-on-surface-variant font-medium">
                               A small batch defaults to a quick, human-paced send rather than being stretched out — the minimum above already keeps a safe gap between sends. Sends are spaced evenly across whatever window you pick; if the hourly/daily cap is hit, remaining emails wait for the next opening rather than being dropped.
                             </p>
+                            {renderWarmupNotice()}
                           </div>
                           <button
                             onClick={scheduleCampaign}
-                            disabled={isSchedulingCampaign || drafts.length === 0 || draftsStale || (campaign?.status === "running")}
+                            disabled={isSchedulingCampaign || drafts.length === 0 || draftsStale || startAtMissing || (campaign?.status === "running") || !settingsView?.configured}
                             className="flex items-center gap-sm rounded-lg bg-primary px-lg py-md text-label-md font-extrabold text-on-primary shadow-lg shadow-primary/20 transition-all hover:scale-[1.02] active:scale-95 disabled:opacity-50 cursor-pointer"
                           >
                             <Icon name="schedule_send" className="text-[18px]" />
@@ -1768,11 +1952,7 @@ export default function Home() {
                         </div>
                       ) : (
                       <div className="rounded-xl border border-outline bg-surface p-lg shadow-sm space-y-md">
-                        <p className="flex items-center gap-sm text-body-sm text-on-surface-variant font-semibold">
-                          <Icon name="lock" className="text-[20px] text-primary" />
-                          Requires <code className="font-mono text-xs bg-surface-container px-1.5 py-0.5 rounded font-bold">EMAIL_USER</code> and{" "}
-                          <code className="font-mono text-xs bg-surface-container px-1.5 py-0.5 rounded font-bold">EMAIL_PASSWORD</code> in your backend credentials.
-                        </p>
+                        {renderSenderStatus()}
 
                         <div className="pt-sm border-t border-outline/50">
                           <span className="text-[10px] font-bold text-on-surface-variant uppercase tracking-wider">Pacing Speed Configuration</span>
@@ -1835,11 +2015,12 @@ export default function Home() {
                             {rateLimitStatus.hourly.remaining} sends left this hour · {rateLimitStatus.daily.remaining} left today
                           </p>
                         )}
+                        {renderWarmupNotice()}
 
                         <div className="mt-md flex gap-md">
                           <button
                             onClick={startSend}
-                            disabled={isSending || drafts.length === 0 || draftsStale || (rateLimitStatus ? !rateLimitStatus.allowed : false)}
+                            disabled={isSending || drafts.length === 0 || draftsStale || (rateLimitStatus ? !rateLimitStatus.allowed : false) || !settingsView?.configured}
                             title={
                               draftsStale
                                 ? "Regenerate drafts to include newly-approved contacts before sending"
@@ -2052,6 +2233,151 @@ export default function Home() {
           </main>
 
         </div>
+
+        {settingsOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/75 p-md backdrop-blur-sm" role="presentation">
+            <div role="dialog" aria-modal="true" aria-labelledby="settings-title" className="w-full max-w-[32rem] max-h-[85vh] overflow-y-auto rounded-2xl border border-outline bg-surface p-lg shadow-2xl space-y-md">
+              <div className="flex items-center justify-between">
+                <h2 id="settings-title" className="text-headline-md font-bold text-on-surface">Sender Settings</h2>
+                <button onClick={() => setSettingsOpen(false)} className="text-on-surface-variant hover:text-on-surface cursor-pointer">
+                  <Icon name="close" className="text-[20px]" />
+                </button>
+              </div>
+
+              {settingsError && (
+                <div className="flex items-start gap-sm rounded-lg border border-red-500/20 bg-red-500/10 px-md py-sm text-body-sm text-red-400">
+                  <Icon name="error" className="text-[18px]" />
+                  <span>{settingsError}</span>
+                </div>
+              )}
+              {settingsWarning && (
+                <div className="flex items-start gap-sm rounded-lg border border-amber-500/25 bg-amber-500/10 px-md py-sm text-body-sm text-amber-200">
+                  <Icon name="warning" className="text-[18px]" />
+                  <span>{settingsWarning}</span>
+                </div>
+              )}
+
+              <div className="space-y-sm">
+                <span className="text-[10px] font-bold text-on-surface-variant uppercase tracking-wider">SMTP Account</span>
+                <div className="grid grid-cols-2 gap-sm">
+                  <label className="col-span-2 flex flex-col gap-xs">
+                    <span className="text-xs text-on-surface-variant font-semibold">Host</span>
+                    <input
+                      type="text"
+                      value={settingsForm.smtpHost}
+                      onChange={(e) => setSettingsForm({ ...settingsForm, smtpHost: e.target.value })}
+                      placeholder="smtp.zoho.in"
+                      className="rounded-lg border border-outline bg-surface-container-low px-md py-sm text-body-sm text-on-surface font-mono"
+                    />
+                  </label>
+                  <label className="flex flex-col gap-xs">
+                    <span className="text-xs text-on-surface-variant font-semibold">Port</span>
+                    <input
+                      type="number"
+                      value={settingsForm.smtpPort}
+                      onChange={(e) => setSettingsForm({ ...settingsForm, smtpPort: Number(e.target.value) || 465 })}
+                      className="rounded-lg border border-outline bg-surface-container-low px-md py-sm text-body-sm text-on-surface font-mono"
+                    />
+                  </label>
+                  <label className="flex flex-col gap-xs">
+                    <span className="text-xs text-on-surface-variant font-semibold">User (from-address)</span>
+                    <input
+                      type="text"
+                      value={settingsForm.smtpUser}
+                      onChange={(e) => setSettingsForm({ ...settingsForm, smtpUser: e.target.value })}
+                      placeholder="hello@yourcompany.com"
+                      className="rounded-lg border border-outline bg-surface-container-low px-md py-sm text-body-sm text-on-surface font-mono"
+                    />
+                  </label>
+                  <label className="col-span-2 flex flex-col gap-xs">
+                    <span className="text-xs text-on-surface-variant font-semibold">Password</span>
+                    <input
+                      type="password"
+                      value={settingsForm.smtpPassword}
+                      onChange={(e) => setSettingsForm({ ...settingsForm, smtpPassword: e.target.value })}
+                      placeholder={settingsView?.hasPassword ? "•••••••• (leave blank to keep current)" : "required"}
+                      className="rounded-lg border border-outline bg-surface-container-low px-md py-sm text-body-sm text-on-surface font-mono"
+                    />
+                  </label>
+                </div>
+              </div>
+
+              <div className="space-y-sm pt-sm border-t border-outline/50">
+                <span className="text-[10px] font-bold text-on-surface-variant uppercase tracking-wider">Send Limits</span>
+                <p className="text-xs text-on-surface-variant">
+                  Zoho&apos;s external sending is reputation-based, dynamically capped at 50-500/hr — going above 50 without an established sending history risks another block; 500 is Zoho&apos;s documented absolute ceiling.
+                </p>
+                <div className="grid grid-cols-2 gap-sm">
+                  <label className="flex flex-col gap-xs">
+                    <span className="text-xs text-on-surface-variant font-semibold">Hourly cap</span>
+                    <input
+                      type="number"
+                      value={settingsForm.hourlyCap}
+                      onChange={(e) => setSettingsForm({ ...settingsForm, hourlyCap: Number(e.target.value) || 1 })}
+                      className="rounded-lg border border-outline bg-surface-container-low px-md py-sm text-body-sm text-on-surface font-mono"
+                    />
+                  </label>
+                  <label className="flex flex-col gap-xs">
+                    <span className="text-xs text-on-surface-variant font-semibold">Daily cap</span>
+                    <input
+                      type="number"
+                      value={settingsForm.dailyCap}
+                      onChange={(e) => setSettingsForm({ ...settingsForm, dailyCap: Number(e.target.value) || 1 })}
+                      className="rounded-lg border border-outline bg-surface-container-low px-md py-sm text-body-sm text-on-surface font-mono"
+                    />
+                  </label>
+                </div>
+                {settingsForm.hourlyCap > 50 && (
+                  <p className="text-xs text-amber-300 font-semibold">Above Zoho&apos;s 50/hr reputation-based low end — safe for an established account, risky otherwise.</p>
+                )}
+              </div>
+
+              <div className="space-y-sm pt-sm border-t border-outline/50">
+                <span className="text-[10px] font-bold text-on-surface-variant uppercase tracking-wider">Warm-up</span>
+                <p className="text-xs text-on-surface-variant">
+                  Following Zoho&apos;s own guidance to ramp volume up gradually: when enabled, actual sending starts well below your caps above and increases to them over ~14 days, rather than sending at full volume from day one.
+                </p>
+                <label className="flex items-center gap-sm">
+                  <input
+                    type="checkbox"
+                    checked={settingsForm.warmupEnabled}
+                    onChange={(e) => setSettingsForm({ ...settingsForm, warmupEnabled: e.target.checked })}
+                    className="h-4 w-4"
+                  />
+                  <span className="text-body-sm text-on-surface">Warm-up enabled</span>
+                </label>
+                {settingsView?.effective.warmupActive && (
+                  <p className="text-xs font-mono text-primary font-semibold">
+                    Currently: {settingsView.effective.hourlyCap}/{settingsView.effective.hourlyTarget} per hour (day {settingsView.effective.warmupDay} of {settingsView.effective.warmupDays})
+                  </p>
+                )}
+                <button
+                  onClick={handleResetWarmup}
+                  disabled={isResettingWarmup || !settingsView?.configured}
+                  className="rounded-lg border border-outline bg-surface-container-low px-md py-sm text-xs font-bold text-on-surface transition-colors hover:bg-surface-container cursor-pointer disabled:opacity-50"
+                >
+                  {isResettingWarmup ? "Resetting..." : "Reset warm-up (restart ramp from the floor)"}
+                </button>
+              </div>
+
+              <div className="flex justify-end gap-sm pt-sm">
+                <button
+                  onClick={() => setSettingsOpen(false)}
+                  className="rounded-lg border border-outline bg-surface-container-low px-md py-sm text-label-md font-bold text-on-surface-variant transition-colors hover:text-on-surface cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={saveSettings}
+                  disabled={isSavingSettings}
+                  className="rounded-lg bg-primary px-md py-sm text-label-md font-extrabold text-on-primary shadow-sm transition-transform hover:scale-[1.02] active:scale-95 cursor-pointer disabled:opacity-50"
+                >
+                  {isSavingSettings ? "Saving..." : "Save"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

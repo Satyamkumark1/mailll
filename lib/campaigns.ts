@@ -32,10 +32,15 @@ export interface CreateCampaignInput {
   drafts: DraftResult[];
   config: OutreachConfig;
   durationHours: number;
+  // Optional future start time (ISO string). Omitted, or in the past,
+  // means "start now" — we never silently schedule into the past.
+  startAt?: string;
 }
 
-export async function createCampaign({ drafts, config, durationHours }: CreateCampaignInput): Promise<string> {
-  const windowStart = new Date();
+export async function createCampaign({ drafts, config, durationHours, startAt }: CreateCampaignInput): Promise<string> {
+  const now = new Date();
+  const requestedStart = startAt ? new Date(startAt) : now;
+  const windowStart = requestedStart.getTime() > now.getTime() ? requestedStart : now;
   const windowEnd = new Date(windowStart.getTime() + durationHours * 3600_000);
   const scheduledTimes = computeScheduledTimes(drafts.length, windowStart, windowEnd);
 

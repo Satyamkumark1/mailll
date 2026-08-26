@@ -1,5 +1,6 @@
 import { sendMailDirect } from "@/lib/send-mail";
 import { peekRateLimitStatus, reserveSendSlot } from "@/lib/send-rate-limiter";
+import { getSenderSettings } from "@/lib/sender-settings";
 
 export const runtime = "nodejs";
 
@@ -13,13 +14,9 @@ export async function POST(request: Request) {
     return Response.json({ error: "Missing to/subject/body" }, { status: 400 });
   }
 
-  const user = process.env.EMAIL_USER?.trim();
-  const pass = process.env.EMAIL_PASSWORD?.trim();
-  if (!user || !pass) {
-    return Response.json(
-      { error: "EMAIL_USER / EMAIL_PASSWORD not set in .env.local (server restart required after adding)" },
-      { status: 500 }
-    );
+  const settings = await getSenderSettings();
+  if (!settings) {
+    return Response.json({ error: "No sender account configured yet — set one up in Settings." }, { status: 500 });
   }
 
   const rateLimit = await reserveSendSlot();
