@@ -70,7 +70,8 @@ export default function ValidatorLayout({ children }: { children: React.ReactNod
   const router = useRouter();
   const segment = useSelectedLayoutSegment() as Tab | null;
 
-  const { emails, results, drafts, sendResults, isValidating, isSending, error, reset } = useValidatorStore();
+  const { emails, results, drafts, sendResults, activeCampaignId, isValidating, isSending, error, reset } =
+    useValidatorStore();
   const validContacts = useMemo(() => results.filter((r) => r.status === "valid"), [results]);
   const draftsStale = useMemo(() => computeDraftsStale(validContacts, drafts), [validContacts, drafts]);
 
@@ -80,10 +81,13 @@ export default function ValidatorLayout({ children }: { children: React.ReactNod
       if (tab === "history") return true;
       if (tab === "validate") return emails.length > 0;
       if (tab === "draft") return validContacts.length > 0;
-      if (tab === "send") return drafts.length > 0 && !draftsStale;
+      // History's "View" can send you here to check a campaign scheduled
+      // from a different browser/session, with no local drafts at all —
+      // that's still a legitimate reason to land on Send.
+      if (tab === "send") return (drafts.length > 0 && !draftsStale) || Boolean(activeCampaignId);
       return results.length > 0;
     },
-    [emails.length, validContacts.length, drafts.length, draftsStale, results.length]
+    [emails.length, validContacts.length, drafts.length, draftsStale, results.length, activeCampaignId]
   );
 
   const stageComplete: Record<Tab, boolean> = {
