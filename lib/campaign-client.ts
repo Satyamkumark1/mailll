@@ -1,6 +1,12 @@
 import type { DraftResult, OutreachConfig } from "./store";
 import type { CampaignEmailStatus, CampaignStatus } from "./campaigns";
 
+// Shared between the Send and History pages: Send rehydrates/tracks the
+// single "active" campaign id under this key, History writes it before
+// navigating a user to Send to view a campaign from the list.
+export const CAMPAIGN_ID_STORAGE_KEY = "elevique_active_campaign_id";
+export const CAMPAIGN_POLL_MS = 20_000;
+
 export interface CampaignEmailView {
   email: string;
   status: CampaignEmailStatus;

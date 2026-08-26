@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type { RateLimitStatus } from "./send-rate-limiter";
+import type { ParsedCsv } from "./utils";
 
 export type { RateLimitStatus };
 
@@ -80,8 +81,9 @@ export const MAX_CONSECUTIVE_SEND_FAILURES = 2;
 export type Tab = "upload" | "validate" | "results" | "draft" | "send" | "export" | "history";
 
 interface ValidatorState {
-  activeTab: Tab;
   emails: EmailRow[];
+  uploadFileName: string | null;
+  uploadParseInfo: ParsedCsv | null;
   results: EmailResult[];
   isValidating: boolean;
   progress: { done: number; total: number };
@@ -98,10 +100,11 @@ interface ValidatorState {
   sendBlockedReason: string | null;
   sendAutoResumeCountdown: number | null;
   sendPausedReason: string | null;
+  sendCancelRequested: boolean;
   activeCampaignId: string | null;
   setActiveCampaignId: (id: string | null) => void;
-  setActiveTab: (tab: Tab) => void;
   setEmails: (emails: EmailRow[]) => void;
+  setUploadInfo: (fileName: string, parseInfo: ParsedCsv) => void;
   setValidating: (v: boolean) => void;
   setProgress: (done: number, total: number) => void;
   appendResults: (batch: EmailResult[]) => void;
@@ -124,12 +127,14 @@ interface ValidatorState {
   setSendBlockedReason: (reason: string | null) => void;
   setSendAutoResumeCountdown: (sec: number | null) => void;
   setSendPausedReason: (reason: string | null) => void;
+  setSendCancelRequested: (v: boolean) => void;
   reset: () => void;
 }
 
 export const useValidatorStore = create<ValidatorState>((set) => ({
-  activeTab: "upload",
   emails: [],
+  uploadFileName: null,
+  uploadParseInfo: null,
   results: [],
   isValidating: false,
   progress: { done: 0, total: 0 },
@@ -146,10 +151,11 @@ export const useValidatorStore = create<ValidatorState>((set) => ({
   sendBlockedReason: null,
   sendAutoResumeCountdown: null,
   sendPausedReason: null,
+  sendCancelRequested: false,
   activeCampaignId: null,
   setActiveCampaignId: (id) => set({ activeCampaignId: id }),
-  setActiveTab: (tab) => set({ activeTab: tab }),
   setEmails: (emails) => set({ emails, results: [], error: null }),
+  setUploadInfo: (fileName, parseInfo) => set({ uploadFileName: fileName, uploadParseInfo: parseInfo }),
   setValidating: (v) => set({ isValidating: v }),
   setProgress: (done, total) => set({ progress: { done, total } }),
   appendResults: (batch) => set((s) => ({ results: [...s.results, ...batch] })),
@@ -197,9 +203,12 @@ export const useValidatorStore = create<ValidatorState>((set) => ({
   setSendBlockedReason: (reason) => set({ sendBlockedReason: reason }),
   setSendAutoResumeCountdown: (sec) => set({ sendAutoResumeCountdown: sec }),
   setSendPausedReason: (reason) => set({ sendPausedReason: reason }),
+  setSendCancelRequested: (v) => set({ sendCancelRequested: v }),
   reset: () =>
     set({
       emails: [],
+      uploadFileName: null,
+      uploadParseInfo: null,
       results: [],
       isValidating: false,
       progress: { done: 0, total: 0 },
@@ -215,6 +224,6 @@ export const useValidatorStore = create<ValidatorState>((set) => ({
       sendBlockedReason: null,
       sendAutoResumeCountdown: null,
       sendPausedReason: null,
-      activeTab: "upload",
+      sendCancelRequested: false,
     }),
 }));
