@@ -7,14 +7,18 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 CREATE TABLE IF NOT EXISTS campaigns (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  status TEXT NOT NULL DEFAULT 'running', -- running | completed | canceled
+  status TEXT NOT NULL DEFAULT 'running', -- running | paused | completed | canceled
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   window_start TIMESTAMPTZ NOT NULL,
   window_end TIMESTAMPTZ NOT NULL,
   total_count INT NOT NULL,
   sent_count INT NOT NULL DEFAULT 0,
-  failed_count INT NOT NULL DEFAULT 0
+  failed_count INT NOT NULL DEFAULT 0,
+  consecutive_failures INT NOT NULL DEFAULT 0
 );
+-- Re-run this against an already-provisioned database — CREATE TABLE IF NOT
+-- EXISTS above won't add the column to a table that already exists.
+ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS consecutive_failures INT NOT NULL DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS campaign_emails (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

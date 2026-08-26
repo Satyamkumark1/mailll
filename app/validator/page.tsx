@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { Icon } from "@/components/icon";
 import { Logo } from "@/components/logo";
-import { cancelBackgroundCampaign, createBackgroundCampaign, getCampaignStatus, listCampaigns, type CampaignListView, type CampaignView } from "@/lib/campaign-client";
+import { cancelBackgroundCampaign, createBackgroundCampaign, getCampaignStatus, listCampaigns, resumeBackgroundCampaign, type CampaignListView, type CampaignView } from "@/lib/campaign-client";
 import { computeMinDurationHours, formatDurationHours } from "@/lib/campaign-schedule";
 import { getSenderSettingsView, resetWarmupClient, saveSenderSettingsView, type SenderSettingsView } from "@/lib/settings-client";
 import { generateDrafts } from "@/lib/draft-generator";
@@ -14,6 +14,7 @@ import { validateEmails } from "@/lib/groq-validator";
 import {
   ELEVIQUE_OUTREACH_CONFIG,
   useValidatorStore,
+  type DraftResult,
   type EmailResult,
   type EmailStatus,
   type OutreachConfig,
@@ -40,7 +41,16 @@ const SEND_STATUS_STYLES: Record<SendStatus, string> = {
 
 const CAMPAIGN_STATUS_STYLES: Record<CampaignListView["status"], string> = {
   running: "bg-primary/10 text-primary border border-primary/20",
+  paused: "bg-amber-500/10 text-amber-400 border border-amber-500/20",
   completed: "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20",
+  canceled: "bg-on-surface-variant/10 text-on-surface-variant border border-outline",
+};
+
+const CAMPAIGN_EMAIL_STATUS_STYLES: Record<CampaignView["emails"][number]["status"], string> = {
+  pending: "bg-on-surface-variant/10 text-on-surface-variant border border-outline",
+  sending: "bg-primary/10 text-primary border border-primary/20",
+  sent: "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20",
+  failed: "bg-red-500/10 text-red-400 border border-red-500/20",
   canceled: "bg-on-surface-variant/10 text-on-surface-variant border border-outline",
 };
 
@@ -57,10 +67,10 @@ export default function Home() {
   const {
     activeTab, emails, results, isValidating, progress, error,
     drafts, isDrafting, draftProgress, draftError, outreachConfig,
-    sendResults, isSending, sendProgress, rateLimitStatus, sendBlockedReason, sendAutoResumeCountdown, activeCampaignId,
+    sendResults, isSending, sendProgress, rateLimitStatus, sendBlockedReason, sendAutoResumeCountdown, sendPausedReason, activeCampaignId,
     setActiveTab, setEmails, setValidating, setProgress, appendResults, markResultValid, markAllFlaggedValid, markAllInvalidValid, setError, reset,
     setOutreachConfig, setDrafting, setDraftProgress, appendDrafts, setDraftError, clearDrafts, updateDraft,
-    setSending, setSendProgress, appendSendResults, clearSendResults, setRateLimitStatus, setSendBlockedReason, setSendAutoResumeCountdown, setActiveCampaignId,
+    setSending, setSendProgress, appendSendResults, clearSendResults, setRateLimitStatus, setSendBlockedReason, setSendAutoResumeCountdown, setSendPausedReason, setActiveCampaignId,
   } = store;
 
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -514,6 +524,16 @@ export default function Home() {
     }
   }, [activeCampaignId, refreshCampaign]);
 
+  const resumeCampaignHandler = useCallback(async () => {
+    if (!activeCampaignId) return;
+    try {
+      await resumeBackgroundCampaign(activeCampaignId);
+      await refreshCampaign(activeCampaignId);
+    } catch (err) {
+      setCampaignError(err instanceof Error ? err.message : "Failed to resume campaign");
+    }
+  }, [activeCampaignId, refreshCampaign]);
+
   const dismissCampaign = useCallback(() => {
     window.localStorage.removeItem(CAMPAIGN_ID_STORAGE_KEY);
     setActiveCampaignId(null);
@@ -555,6 +575,64 @@ export default function Home() {
     }
   }, []);
 
+  // Shared by a fresh run (startSend) and continuing after a consecutive-
+  // failure pause (resumeSend) — startDone lets a resumed run keep counting
+  // progress against the original total instead of restarting the bar.
+  const runSendLoop = useCallback(
+    async (toSend: DraftResult[], startDone: number) => {
+      const { minSec, maxSec } = PACING_PRESETS[pacing];
+      cancelSendRef.current = false;
+      setSending(true);
+      setSendPausedReason(null);
+
+      await sendDraftsPaced(
+        toSend,
+        outreachConfig,
+        minSec * 1000,
+        maxSec * 1000,
+        (done) => setSendProgress(startDone + done, drafts.length),
+        (result) => appendSendResults([result]),
+        () => cancelSendRef.current,
+        (msg, retryAfterSec) => {
+          const resumeTime = new Date(Date.now() + retryAfterSec * 1000).toLocaleTimeString([], {
+            hour: "2-digit",
+            minute: "2-digit",
+          });
+          setSendBlockedReason(`${msg} Auto-resuming next batch around ${resumeTime}.`);
+          getSendRateStatus().then(setRateLimitStatus).catch(() => {});
+        },
+        true,
+        (sec) => {
+          setSendAutoResumeCountdown(sec);
+          if (sec === null) {
+            getSendRateStatus().then(setRateLimitStatus).catch(() => {});
+          }
+        },
+        (failCount) => {
+          setSendPausedReason(
+            `Sending paused after ${failCount} failed sends in a row. Check the delivery log below, then resume or dismiss.`
+          );
+        }
+      );
+
+      setSending(false);
+      setSendAutoResumeCountdown(null);
+      getSendRateStatus().then(setRateLimitStatus).catch(() => {});
+    },
+    [
+      drafts,
+      outreachConfig,
+      pacing,
+      setSending,
+      setSendProgress,
+      appendSendResults,
+      setSendBlockedReason,
+      setRateLimitStatus,
+      setSendAutoResumeCountdown,
+      setSendPausedReason,
+    ]
+  );
+
   const startSend = useCallback(async () => {
     const { minSec, maxSec } = PACING_PRESETS[pacing];
     const totalMinSec = drafts.length * minSec;
@@ -570,50 +648,19 @@ export default function Home() {
     if (!confirmed) return;
 
     clearSendResults();
-    setSending(true);
     setSendProgress(0, drafts.length);
-    cancelSendRef.current = false;
+    await runSendLoop(drafts, 0);
+  }, [drafts, pacing, clearSendResults, setSendProgress, runSendLoop]);
 
-    await sendDraftsPaced(
-      drafts,
-      outreachConfig,
-      minSec * 1000,
-      maxSec * 1000,
-      (done, total) => setSendProgress(done, total),
-      (result) => appendSendResults([result]),
-      () => cancelSendRef.current,
-      (msg, retryAfterSec) => {
-        const resumeTime = new Date(Date.now() + retryAfterSec * 1000).toLocaleTimeString([], {
-          hour: "2-digit",
-          minute: "2-digit",
-        });
-        setSendBlockedReason(`${msg} Auto-resuming next batch around ${resumeTime}.`);
-        getSendRateStatus().then(setRateLimitStatus).catch(() => {});
-      },
-      true,
-      (sec) => {
-        setSendAutoResumeCountdown(sec);
-        if (sec === null) {
-          getSendRateStatus().then(setRateLimitStatus).catch(() => {});
-        }
-      }
-    );
+  const resumeSend = useCallback(async () => {
+    const remaining = drafts.slice(sendResults.length);
+    if (remaining.length === 0) return;
+    await runSendLoop(remaining, sendResults.length);
+  }, [drafts, sendResults, runSendLoop]);
 
-    setSending(false);
-    setSendAutoResumeCountdown(null);
-    getSendRateStatus().then(setRateLimitStatus).catch(() => {});
-  }, [
-    drafts,
-    outreachConfig,
-    pacing,
-    setSending,
-    setSendProgress,
-    appendSendResults,
-    clearSendResults,
-    setSendBlockedReason,
-    setRateLimitStatus,
-    setSendAutoResumeCountdown,
-  ]);
+  const dismissSendPause = useCallback(() => {
+    setSendPausedReason(null);
+  }, [setSendPausedReason]);
 
   const stopSend = useCallback(() => {
     cancelSendRef.current = true;
@@ -1812,9 +1859,13 @@ export default function Home() {
                       {campaign && (
                         <div className="rounded-xl border border-primary/30 bg-primary/5 p-lg shadow-sm space-y-md">
                           <div className="flex items-center justify-between">
-                            <p className="flex items-center gap-sm text-body-sm font-bold text-primary">
-                              <Icon name="cloud_sync" className="text-[20px]" />
-                              Background campaign {campaign.status === "running" ? "running on the server" : campaign.status}
+                            <p className={cn("flex items-center gap-sm text-body-sm font-bold", campaign.status === "paused" ? "text-amber-400" : "text-primary")}>
+                              <Icon name={campaign.status === "paused" ? "pause_circle" : "cloud_sync"} className="text-[20px]" />
+                              {campaign.status === "running"
+                                ? "Background campaign running on the server"
+                                : campaign.status === "paused"
+                                ? `Paused — ${campaign.consecutiveFailures} failed in a row`
+                                : `Background campaign ${campaign.status}`}
                             </p>
                             {(campaign.status === "completed" || campaign.status === "canceled") && (
                               <button onClick={dismissCampaign} className="text-xs font-bold text-on-surface-variant hover:text-on-surface cursor-pointer">
@@ -1825,6 +1876,8 @@ export default function Home() {
                           <p className="text-xs text-on-surface-variant">
                             {campaign.status === "running"
                               ? "You can close this tab — sending continues on the server until the window ends."
+                              : campaign.status === "paused"
+                              ? "The engine stopped itself after 2 consecutive failed sends — check the log below for why, fix the issue, then resume."
                               : `Finished ${new Date(campaign.windowEnd).toLocaleString()}.`}
                           </p>
                           <div>
@@ -1842,13 +1895,51 @@ export default function Home() {
                               />
                             </div>
                           </div>
-                          {campaign.status === "running" && (
-                            <button
-                              onClick={cancelCampaign}
-                              className="rounded-lg border border-outline bg-surface-container-low px-md py-sm text-label-md font-bold text-on-surface transition-colors hover:bg-surface-container cursor-pointer"
-                            >
-                              Cancel campaign
-                            </button>
+                          {(campaign.status === "running" || campaign.status === "paused") && (
+                            <div className="flex gap-sm">
+                              {campaign.status === "paused" && (
+                                <button
+                                  onClick={resumeCampaignHandler}
+                                  className="rounded-lg bg-primary px-md py-sm text-label-md font-extrabold text-on-primary shadow-sm transition-opacity hover:opacity-95 cursor-pointer"
+                                >
+                                  Resume campaign
+                                </button>
+                              )}
+                              <button
+                                onClick={cancelCampaign}
+                                className="rounded-lg border border-outline bg-surface-container-low px-md py-sm text-label-md font-bold text-on-surface transition-colors hover:bg-surface-container cursor-pointer"
+                              >
+                                Cancel campaign
+                              </button>
+                            </div>
+                          )}
+                          {campaign.emails.length > 0 && (
+                            <div className="max-h-72 overflow-y-auto rounded-lg border border-outline/50">
+                              <table className="w-full border-collapse text-left text-body-sm">
+                                <thead className="sticky top-0 bg-surface-container border-b border-outline select-none">
+                                  <tr>
+                                    <th className="px-md py-sm text-[10px] font-bold uppercase tracking-wider text-on-surface-variant">Email Address</th>
+                                    <th className="px-md py-sm text-[10px] font-bold uppercase tracking-wider text-on-surface-variant">Status</th>
+                                    <th className="px-md py-sm text-[10px] font-bold uppercase tracking-wider text-on-surface-variant">Detail</th>
+                                  </tr>
+                                </thead>
+                                <tbody className="divide-y divide-outline/40">
+                                  {campaign.emails.map((e) => (
+                                    <tr key={e.email} className="hover:bg-surface-container/20">
+                                      <td className="px-md py-sm font-mono text-[11px] text-on-surface">{e.email}</td>
+                                      <td className="px-md py-sm select-none">
+                                        <span className={cn("rounded px-sm py-[2px] text-[10px] font-bold uppercase inline-block text-center", CAMPAIGN_EMAIL_STATUS_STYLES[e.status])}>
+                                          {e.status}
+                                        </span>
+                                      </td>
+                                      <td className="px-md py-sm text-xs text-on-surface-variant/90 leading-relaxed">
+                                        {e.error || (e.sentAt ? `Sent ${new Date(e.sentAt).toLocaleTimeString()}` : "Waiting for its scheduled slot")}
+                                      </td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
                           )}
                         </div>
                       )}
@@ -1943,7 +2034,7 @@ export default function Home() {
                           </div>
                           <button
                             onClick={scheduleCampaign}
-                            disabled={isSchedulingCampaign || drafts.length === 0 || draftsStale || startAtMissing || (campaign?.status === "running") || !settingsView?.configured}
+                            disabled={isSchedulingCampaign || drafts.length === 0 || draftsStale || startAtMissing || (campaign?.status === "running" || campaign?.status === "paused") || !settingsView?.configured}
                             className="flex items-center gap-sm rounded-lg bg-primary px-lg py-md text-label-md font-extrabold text-on-primary shadow-lg shadow-primary/20 transition-all hover:scale-[1.02] active:scale-95 disabled:opacity-50 cursor-pointer"
                           >
                             <Icon name="schedule_send" className="text-[18px]" />
@@ -1976,7 +2067,28 @@ export default function Home() {
                           <p className="mt-sm text-xs text-on-surface-variant font-medium">{PACING_PRESETS[pacing].note}</p>
                         </div>
 
-                        {sendAutoResumeCountdown !== null && sendAutoResumeCountdown > 0 ? (
+                        {sendPausedReason ? (
+                          <div className="flex items-start gap-sm rounded-lg border border-red-500/25 bg-red-500/10 px-md py-sm text-body-sm text-red-300">
+                            <Icon name="pause_circle" className="mt-0.5 text-[18px]" />
+                            <div className="flex-1 space-y-sm">
+                              <span>{sendPausedReason}</span>
+                              <div className="flex gap-sm">
+                                <button
+                                  onClick={resumeSend}
+                                  className="rounded-lg bg-primary px-md py-xs text-xs font-extrabold text-on-primary shadow-sm transition-opacity hover:opacity-95 cursor-pointer"
+                                >
+                                  Resume sending ({drafts.length - sendResults.length} left)
+                                </button>
+                                <button
+                                  onClick={dismissSendPause}
+                                  className="rounded-lg border border-outline bg-surface-container-low px-md py-xs text-xs font-bold text-on-surface transition-colors hover:bg-surface-container cursor-pointer"
+                                >
+                                  Dismiss
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        ) : sendAutoResumeCountdown !== null && sendAutoResumeCountdown > 0 ? (
                           <div className="flex items-center gap-sm rounded-lg border border-primary/30 bg-primary/10 px-md py-sm text-body-sm text-primary font-semibold animate-pulse">
                             <Icon name="schedule" className="text-[18px]" />
                             <span>
@@ -2020,7 +2132,7 @@ export default function Home() {
                         <div className="mt-md flex gap-md">
                           <button
                             onClick={startSend}
-                            disabled={isSending || drafts.length === 0 || draftsStale || (rateLimitStatus ? !rateLimitStatus.allowed : false) || !settingsView?.configured}
+                            disabled={isSending || !!sendPausedReason || drafts.length === 0 || draftsStale || (rateLimitStatus ? !rateLimitStatus.allowed : false) || !settingsView?.configured}
                             title={
                               draftsStale
                                 ? "Regenerate drafts to include newly-approved contacts before sending"

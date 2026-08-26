@@ -20,6 +20,7 @@ export interface CampaignListView {
 }
 
 export interface CampaignView extends CampaignListView {
+  consecutiveFailures: number;
   emails: CampaignEmailView[];
 }
 
@@ -62,5 +63,12 @@ export async function cancelBackgroundCampaign(id: string): Promise<void> {
   const res = await fetch(`/api/campaigns/${id}/cancel`, { method: "POST" });
   if (!res.ok) {
     throw new Error(`Failed to cancel campaign (HTTP ${res.status})`);
+  }
+}
+
+export async function resumeBackgroundCampaign(id: string): Promise<void> {
+  const res = await fetch(`/api/campaigns/${id}/resume`, { method: "POST" });
+  if (!res.ok) {
+    throw new Error(`Failed to resume campaign (HTTP ${res.status})`);
   }
 }

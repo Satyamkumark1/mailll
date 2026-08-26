@@ -1,5 +1,5 @@
-import { buildEmailHtml, LOGO_CID } from "./email-signature";
-import type { DraftResult, OutreachConfig, RateLimitStatus, SendResult } from "./store";
+import { buildEmailHtml, LOGO_CID } from "./email-signature.ts";
+import { MAX_CONSECUTIVE_SEND_FAILURES, type DraftResult, type OutreachConfig, type RateLimitStatus, type SendResult } from "./store.ts";
 
 export class SendRateLimitedError extends Error {
   retryAfterSeconds: number;
@@ -69,8 +69,10 @@ export async function sendDraftsPaced(
   shouldCancel: () => boolean,
   onRateLimited?: (message: string, retryAfterSeconds: number) => void,
   autoResume = true,
-  onAutoResumeWait?: (secondsRemaining: number | null) => void
+  onAutoResumeWait?: (secondsRemaining: number | null) => void,
+  onPaused?: (failCount: number) => void
 ): Promise<void> {
+  let consecutiveFailures = 0;
   for (let i = 0; i < drafts.length; i++) {
     if (shouldCancel()) {
       onAutoResumeWait?.(null);
@@ -81,6 +83,11 @@ export async function sendDraftsPaced(
       onResult(result);
       onProgress(i + 1, drafts.length);
       onAutoResumeWait?.(null);
+      consecutiveFailures = result.status === "failed" ? consecutiveFailures + 1 : 0;
+      if (consecutiveFailures >= MAX_CONSECUTIVE_SEND_FAILURES && i < drafts.length - 1) {
+        onPaused?.(consecutiveFailures);
+        return;
+      }
     } catch (err) {
       if (err instanceof SendRateLimitedError) {
         onRateLimited?.(err.message, err.retryAfterSeconds);

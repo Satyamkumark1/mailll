@@ -1,9 +1,9 @@
 import { sql } from "./db.ts";
 import { computeScheduledTimes } from "./campaign-schedule.ts";
 import { buildEmailHtml, LOGO_CID } from "./email-signature.ts";
-import type { DraftResult, OutreachConfig } from "./store";
+import { MAX_CONSECUTIVE_SEND_FAILURES, type DraftResult, type OutreachConfig } from "./store.ts";
 
-export type CampaignStatus = "running" | "completed" | "canceled";
+export type CampaignStatus = "running" | "paused" | "completed" | "canceled";
 export type CampaignEmailStatus = "pending" | "sending" | "sent" | "failed" | "canceled";
 
 export interface CampaignEmailSummary {
@@ -25,6 +25,7 @@ export interface CampaignListItem {
 }
 
 export interface CampaignSummary extends CampaignListItem {
+  consecutiveFailures: number;
   emails: CampaignEmailSummary[];
 }
 
@@ -114,6 +115,7 @@ export async function getCampaign(id: string): Promise<CampaignSummary | null> {
     totalCount: campaign.total_count as number,
     sentCount: campaign.sent_count as number,
     failedCount: campaign.failed_count as number,
+    consecutiveFailures: campaign.consecutive_failures as number,
     emails: emails.map((e) => ({
       email: e.to_email as string,
       status: e.status as CampaignEmailStatus,
@@ -131,6 +133,16 @@ export async function cancelCampaign(id: string): Promise<void> {
   await sql`
     UPDATE campaigns SET status = 'canceled'
     WHERE id = ${id} AND status = 'running'
+  `;
+}
+
+// Un-pauses a campaign that stopped itself after too many consecutive
+// failures — the cron worker only claims rows from 'running' campaigns, so
+// this is what lets it pick the backlog back up.
+export async function resumeCampaign(id: string): Promise<void> {
+  await sql`
+    UPDATE campaigns SET status = 'running', consecutive_failures = 0
+    WHERE id = ${id} AND status = 'paused'
   `;
 }
 
@@ -193,10 +205,20 @@ export async function recordEmailResult(
 ): Promise<void> {
   if (result.status === "sent") {
     await sql`UPDATE campaign_emails SET status = 'sent', sent_at = now() WHERE id = ${id}`;
-    await sql`UPDATE campaigns SET sent_count = sent_count + 1 WHERE id = ${campaignId}`;
+    await sql`UPDATE campaigns SET sent_count = sent_count + 1, consecutive_failures = 0 WHERE id = ${campaignId}`;
   } else {
     await sql`UPDATE campaign_emails SET status = 'failed', error = ${result.error} WHERE id = ${id}`;
-    await sql`UPDATE campaigns SET failed_count = failed_count + 1 WHERE id = ${campaignId}`;
+    const [updated] = await sql`
+      UPDATE campaigns SET failed_count = failed_count + 1, consecutive_failures = consecutive_failures + 1
+      WHERE id = ${campaignId}
+      RETURNING consecutive_failures
+    `;
+    // Two failures in a row means something is actually broken (bad creds,
+    // blocked domain) rather than one-off bounces — stop and make a human
+    // look, instead of burning through the rest of the list.
+    if ((updated.consecutive_failures as number) >= MAX_CONSECUTIVE_SEND_FAILURES) {
+      await sql`UPDATE campaigns SET status = 'paused' WHERE id = ${campaignId} AND status = 'running'`;
+    }
   }
 
   const [remaining] = await sql`

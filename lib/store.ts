@@ -71,6 +71,12 @@ export interface SendResult {
   error?: string;
 }
 
+// Shared by both send engines (the in-browser paced loop in
+// lib/email-sender.ts and the DB-backed background campaign in
+// lib/campaigns.ts) — back-to-back failures at this count means something
+// is actually broken (bad creds, blocked domain), not routine throttling.
+export const MAX_CONSECUTIVE_SEND_FAILURES = 2;
+
 export type Tab = "upload" | "validate" | "results" | "draft" | "send" | "export" | "history";
 
 interface ValidatorState {
@@ -91,6 +97,7 @@ interface ValidatorState {
   rateLimitStatus: RateLimitStatus | null;
   sendBlockedReason: string | null;
   sendAutoResumeCountdown: number | null;
+  sendPausedReason: string | null;
   activeCampaignId: string | null;
   setActiveCampaignId: (id: string | null) => void;
   setActiveTab: (tab: Tab) => void;
@@ -116,6 +123,7 @@ interface ValidatorState {
   setRateLimitStatus: (status: RateLimitStatus | null) => void;
   setSendBlockedReason: (reason: string | null) => void;
   setSendAutoResumeCountdown: (sec: number | null) => void;
+  setSendPausedReason: (reason: string | null) => void;
   reset: () => void;
 }
 
@@ -137,6 +145,7 @@ export const useValidatorStore = create<ValidatorState>((set) => ({
   rateLimitStatus: null,
   sendBlockedReason: null,
   sendAutoResumeCountdown: null,
+  sendPausedReason: null,
   activeCampaignId: null,
   setActiveCampaignId: (id) => set({ activeCampaignId: id }),
   setActiveTab: (tab) => set({ activeTab: tab }),
@@ -182,10 +191,12 @@ export const useValidatorStore = create<ValidatorState>((set) => ({
       sendProgress: { done: 0, total: 0 },
       sendBlockedReason: null,
       sendAutoResumeCountdown: null,
+      sendPausedReason: null,
     }),
   setRateLimitStatus: (status) => set({ rateLimitStatus: status }),
   setSendBlockedReason: (reason) => set({ sendBlockedReason: reason }),
   setSendAutoResumeCountdown: (sec) => set({ sendAutoResumeCountdown: sec }),
+  setSendPausedReason: (reason) => set({ sendPausedReason: reason }),
   reset: () =>
     set({
       emails: [],
@@ -203,6 +214,7 @@ export const useValidatorStore = create<ValidatorState>((set) => ({
       rateLimitStatus: null,
       sendBlockedReason: null,
       sendAutoResumeCountdown: null,
+      sendPausedReason: null,
       activeTab: "upload",
     }),
 }));
