@@ -7,11 +7,15 @@ export const runtime = "nodejs";
 // shorter) since each due email costs a real SMTP round trip.
 export const maxDuration = 60;
 
-// Small batch — an external cron pings this every ~1 minute anyway, so
-// throughput comes from tick frequency, not batch size. Keeps each
-// invocation well under typical serverless function time limits even
-// though every row costs a real SMTP round trip.
-const BATCH_SIZE = 3;
+// One at a time — an external cron pings this every ~1 minute anyway, so
+// throughput comes from tick frequency, not batch size. Keeping this at 1
+// bounds each invocation's blast radius to a single real SMTP round trip:
+// if a batch of 3 sequential sends occasionally ran long enough to hit the
+// 60s maxDuration below, Vercel would kill the invocation after a rate-limit
+// slot was reserved for one of them but before its result got recorded,
+// wasting that slot (it only gets picked back up 2 minutes later via
+// claimDueEmails' stuck-row retry, by which point it costs a second slot).
+const BATCH_SIZE = 1;
 
 function isAuthorized(request: Request): boolean {
   const secret = process.env.CRON_SECRET;
