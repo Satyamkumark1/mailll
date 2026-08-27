@@ -1,5 +1,5 @@
 import type { DraftResult, OutreachConfig } from "./store";
-import type { CampaignEmailStatus, CampaignStatus } from "./campaigns";
+import type { CampaignEmailStatus, CampaignStatus, DeliveryStatus } from "./campaigns";
 
 // Shared between the Send and History pages: Send rehydrates/tracks the
 // single "active" campaign id under this key, History writes it before
@@ -14,6 +14,8 @@ export interface CampaignEmailView {
   error: string | null;
   sentAt: string | null;
   scheduledAt: string;
+  deliveryStatus: DeliveryStatus;
+  bounceReason: string | null;
 }
 
 export interface CampaignListView {

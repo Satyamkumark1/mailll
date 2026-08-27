@@ -1,3 +1,4 @@
+import { checkBounces } from "@/lib/bounce-checker";
 import { claimDueEmails, recordEmailResult, releaseEmail } from "@/lib/campaigns";
 import { reserveSendSlot } from "@/lib/send-rate-limiter";
 import { sendMailDirect } from "@/lib/send-mail";
@@ -53,6 +54,10 @@ async function tick() {
       failed++;
     }
   }
+
+  // Best-effort and self-throttling (see checkBounces) — runs after the real
+  // send work so a slow/unreachable IMAP server never delays actual sends.
+  await checkBounces();
 
   return { claimed: due.length, sent, failed, deferred };
 }

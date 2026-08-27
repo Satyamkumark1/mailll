@@ -29,6 +29,23 @@ const CAMPAIGN_EMAIL_STATUS_STYLES: Record<CampaignView["emails"][number]["statu
   canceled: "bg-on-surface-variant/10 text-on-surface-variant border border-outline",
   skipped: "bg-on-surface-variant/10 text-on-surface-variant border border-outline",
 };
+const BOUNCED_STATUS_STYLE = "bg-red-500/10 text-red-400 border border-red-500/20";
+
+// "sent" only ever meant the SMTP server accepted the message — a bounce
+// discovered later (lib/bounce-checker.ts) is a more useful thing to show
+// front-and-center than leaving the badge reading "sent" forever.
+function getDisplayStatus(e: CampaignView["emails"][number]): { label: string; className: string } {
+  if (e.status === "sent" && e.deliveryStatus === "bounced") {
+    return { label: "bounced", className: BOUNCED_STATUS_STYLE };
+  }
+  return { label: e.status, className: CAMPAIGN_EMAIL_STATUS_STYLES[e.status] };
+}
+
+function sentDetailSuffix(e: CampaignView["emails"][number]): string {
+  if (e.deliveryStatus === "bounced") return ` — Bounced${e.bounceReason ? `: ${e.bounceReason}` : ""}`;
+  if (e.deliveryStatus === "delivered") return " — Delivered";
+  return " — Confirming delivery…";
+}
 
 export default function SendPage() {
   const { confirmAction, settingsView, openSettings } = useValidatorChrome();
@@ -60,6 +77,10 @@ export default function SendPage() {
       (d) => d.email.toLowerCase().includes(q) || d.brand.toLowerCase().includes(q) || d.pocName.toLowerCase().includes(q)
     );
   }, [drafts, recipientSearch]);
+  // Computed client-side from the emails already in `campaign` — bounces are
+  // discovered asynchronously after the fact (see lib/bounce-checker.ts), so
+  // this can only ever be a snapshot of what's been confirmed so far.
+  const bouncedCount = useMemo(() => campaign?.emails.filter((e) => e.deliveryStatus === "bounced").length ?? 0, [campaign]);
 
   // Polled (not just fetch-once) so a page left open — e.g. watching a
   // background campaign that's currently rate-limited — stays accurate
@@ -372,6 +393,7 @@ export default function SendPage() {
               <span>
                 {campaign.failedCount > 0 ? `${campaign.failedCount} failed` : ""}
                 {campaign.skippedCount > 0 ? `${campaign.failedCount > 0 ? " · " : ""}${campaign.skippedCount} skipped` : ""}
+                {bouncedCount > 0 ? `${campaign.failedCount > 0 || campaign.skippedCount > 0 ? " · " : ""}${bouncedCount} bounced` : ""}
               </span>
             </div>
             <div className="h-2 w-full bg-surface-container rounded-full overflow-hidden">
@@ -457,48 +479,51 @@ export default function SendPage() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-outline/40">
-                    {campaign.emails.map((e) => (
-                      <tr key={e.id} className="hover:bg-surface-container/20">
-                        <td className="px-md py-sm">
-                          {e.status === "pending" && (
-                            <input
-                              type="checkbox"
-                              checked={selectedToSkip.has(e.id)}
-                              disabled={isSkippingEmails}
-                              onChange={(event) =>
-                                setSelectedToSkip((prev) => {
-                                  const next = new Set(prev);
-                                  if (event.target.checked) next.add(e.id);
-                                  else next.delete(e.id);
-                                  return next;
-                                })
-                              }
-                              className="h-4 w-4 cursor-pointer accent-primary disabled:cursor-not-allowed"
-                            />
-                          )}
-                        </td>
-                        <td className="px-md py-sm font-mono text-[11px] text-on-surface">{e.email}</td>
-                        <td className="px-md py-sm select-none">
-                          <span className={cn("rounded px-sm py-[2px] text-[10px] font-bold uppercase inline-block text-center", CAMPAIGN_EMAIL_STATUS_STYLES[e.status])}>
-                            {e.status}
-                          </span>
-                        </td>
-                        <td className="px-md py-sm font-mono text-[11px] text-on-surface-variant">
-                          {new Date(e.scheduledAt).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}
-                        </td>
-                        <td className="px-md py-sm text-xs text-on-surface-variant/90 leading-relaxed">
-                          {e.error
-                            ? e.error
-                            : e.sentAt
-                            ? `Sent ${new Date(e.sentAt).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}`
-                            : e.status === "skipped"
-                            ? "Skipped — won't be sent"
-                            : e.status === "pending" && rateLimitStatus && !rateLimitStatus.allowed
-                            ? `Waiting — send cap reached, resumes in about ${formatRetryAfter(rateLimitStatus.retryAfterSeconds)}`
-                            : "Waiting for its scheduled slot"}
-                        </td>
-                      </tr>
-                    ))}
+                    {campaign.emails.map((e) => {
+                      const display = getDisplayStatus(e);
+                      return (
+                        <tr key={e.id} className="hover:bg-surface-container/20">
+                          <td className="px-md py-sm">
+                            {e.status === "pending" && (
+                              <input
+                                type="checkbox"
+                                checked={selectedToSkip.has(e.id)}
+                                disabled={isSkippingEmails}
+                                onChange={(event) =>
+                                  setSelectedToSkip((prev) => {
+                                    const next = new Set(prev);
+                                    if (event.target.checked) next.add(e.id);
+                                    else next.delete(e.id);
+                                    return next;
+                                  })
+                                }
+                                className="h-4 w-4 cursor-pointer accent-primary disabled:cursor-not-allowed"
+                              />
+                            )}
+                          </td>
+                          <td className="px-md py-sm font-mono text-[11px] text-on-surface">{e.email}</td>
+                          <td className="px-md py-sm select-none">
+                            <span className={cn("rounded px-sm py-[2px] text-[10px] font-bold uppercase inline-block text-center", display.className)}>
+                              {display.label}
+                            </span>
+                          </td>
+                          <td className="px-md py-sm font-mono text-[11px] text-on-surface-variant">
+                            {new Date(e.scheduledAt).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}
+                          </td>
+                          <td className="px-md py-sm text-xs text-on-surface-variant/90 leading-relaxed">
+                            {e.error
+                              ? e.error
+                              : e.sentAt
+                              ? `Sent ${new Date(e.sentAt).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}${sentDetailSuffix(e)}`
+                              : e.status === "skipped"
+                              ? "Skipped — won't be sent"
+                              : e.status === "pending" && rateLimitStatus && !rateLimitStatus.allowed
+                              ? `Waiting — send cap reached, resumes in about ${formatRetryAfter(rateLimitStatus.retryAfterSeconds)}`
+                              : "Waiting for its scheduled slot"}
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>

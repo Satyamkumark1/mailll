@@ -32,10 +32,19 @@ CREATE TABLE IF NOT EXISTS campaign_emails (
   scheduled_at TIMESTAMPTZ NOT NULL,
   status TEXT NOT NULL DEFAULT 'pending', -- pending | sending | sent | failed | canceled | skipped
   error TEXT,
-  sent_at TIMESTAMPTZ
+  sent_at TIMESTAMPTZ,
+  -- Only meaningful once status = 'sent': 'sent' just means the SMTP server
+  -- accepted the message, not that the recipient's mailbox actually kept it.
+  -- NULL = not yet confirmed either way (lib/bounce-checker.ts fills this in).
+  delivery_status TEXT, -- null | delivered | bounced
+  bounce_reason TEXT,
+  bounce_checked_at TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS campaign_emails_due_idx ON campaign_emails (status, scheduled_at);
 CREATE INDEX IF NOT EXISTS campaign_emails_campaign_idx ON campaign_emails (campaign_id);
+ALTER TABLE campaign_emails ADD COLUMN IF NOT EXISTS delivery_status TEXT;
+ALTER TABLE campaign_emails ADD COLUMN IF NOT EXISTS bounce_reason TEXT;
+ALTER TABLE campaign_emails ADD COLUMN IF NOT EXISTS bounce_checked_at TIMESTAMPTZ;
 
 CREATE TABLE IF NOT EXISTS send_attempts (
   sent_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -59,5 +68,15 @@ CREATE TABLE IF NOT EXISTS sender_settings (
   daily_cap INT NOT NULL,
   warmup_enabled BOOLEAN NOT NULL DEFAULT true,
   warmup_start_date TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  -- Bookkeeping for lib/bounce-checker.ts's IMAP poll of this same mailbox
+  -- for bounce-back (DSN) notifications. bounce_last_uid/bounce_uidvalidity
+  -- track how far into the inbox it's already scanned, so re-polling doesn't
+  -- reprocess the same messages.
+  last_bounce_check_at TIMESTAMPTZ,
+  bounce_last_uid BIGINT NOT NULL DEFAULT 0,
+  bounce_uidvalidity BIGINT NOT NULL DEFAULT 0
 );
+ALTER TABLE sender_settings ADD COLUMN IF NOT EXISTS last_bounce_check_at TIMESTAMPTZ;
+ALTER TABLE sender_settings ADD COLUMN IF NOT EXISTS bounce_last_uid BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE sender_settings ADD COLUMN IF NOT EXISTS bounce_uidvalidity BIGINT NOT NULL DEFAULT 0;

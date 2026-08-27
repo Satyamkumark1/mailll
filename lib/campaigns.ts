@@ -6,6 +6,8 @@ import { MAX_CONSECUTIVE_SEND_FAILURES, type DraftResult, type OutreachConfig } 
 export type CampaignStatus = "running" | "paused" | "completed" | "canceled";
 export type CampaignEmailStatus = "pending" | "sending" | "sent" | "failed" | "canceled" | "skipped";
 
+export type DeliveryStatus = "delivered" | "bounced" | null;
+
 export interface CampaignEmailSummary {
   id: string;
   email: string;
@@ -13,6 +15,12 @@ export interface CampaignEmailSummary {
   error: string | null;
   sentAt: string | null;
   scheduledAt: string;
+  // Only meaningful once status = 'sent' — see lib/bounce-checker.ts. Sending
+  // successfully (status = 'sent') just means the SMTP server accepted the
+  // message; this is filled in later, asynchronously, once the mailbox
+  // either bounces it or enough time passes with no bounce to infer delivery.
+  deliveryStatus: DeliveryStatus;
+  bounceReason: string | null;
 }
 
 export interface CampaignListItem {
@@ -104,7 +112,7 @@ export async function getCampaign(id: string): Promise<CampaignSummary | null> {
   if (!campaign) return null;
 
   const emails = await sql`
-    SELECT id, to_email, status, error, sent_at, scheduled_at
+    SELECT id, to_email, status, error, sent_at, scheduled_at, delivery_status, bounce_reason
     FROM campaign_emails
     WHERE campaign_id = ${id}
     ORDER BY scheduled_at ASC
@@ -128,6 +136,8 @@ export async function getCampaign(id: string): Promise<CampaignSummary | null> {
       error: (e.error as string | null) ?? null,
       sentAt: (e.sent_at as string | null) ?? null,
       scheduledAt: e.scheduled_at as string,
+      deliveryStatus: (e.delivery_status as DeliveryStatus) ?? null,
+      bounceReason: (e.bounce_reason as string | null) ?? null,
     })),
   };
 }
