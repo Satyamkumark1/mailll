@@ -8,6 +8,7 @@ export const CAMPAIGN_ID_STORAGE_KEY = "elevique_active_campaign_id";
 export const CAMPAIGN_POLL_MS = 20_000;
 
 export interface CampaignEmailView {
+  id: string;
   email: string;
   status: CampaignEmailStatus;
   error: string | null;
@@ -24,6 +25,7 @@ export interface CampaignListView {
   totalCount: number;
   sentCount: number;
   failedCount: number;
+  skippedCount: number;
 }
 
 export interface CampaignView extends CampaignListView {
@@ -93,4 +95,20 @@ export async function restartBackgroundCampaign(id: string, durationHours: numbe
     const data = await res.json().catch(() => ({}));
     throw new Error(data.error || `Failed to restart campaign (HTTP ${res.status})`);
   }
+}
+
+// Pulls specific still-pending rows out of a campaign without canceling the
+// whole thing — the emailIds are campaign_emails row ids (from CampaignView's
+// emails[].id), not email addresses.
+export async function skipCampaignEmails(id: string, emailIds: string[]): Promise<{ skipped: number }> {
+  const res = await fetch(`/api/campaigns/${id}/skip`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ emailIds }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `Failed to skip email(s) (HTTP ${res.status})`);
+  }
+  return res.json();
 }

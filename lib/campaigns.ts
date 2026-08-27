@@ -4,9 +4,10 @@ import { buildEmailHtml, LOGO_CID } from "./email-signature.ts";
 import { MAX_CONSECUTIVE_SEND_FAILURES, type DraftResult, type OutreachConfig } from "./store.ts";
 
 export type CampaignStatus = "running" | "paused" | "completed" | "canceled";
-export type CampaignEmailStatus = "pending" | "sending" | "sent" | "failed" | "canceled";
+export type CampaignEmailStatus = "pending" | "sending" | "sent" | "failed" | "canceled" | "skipped";
 
 export interface CampaignEmailSummary {
+  id: string;
   email: string;
   status: CampaignEmailStatus;
   error: string | null;
@@ -23,6 +24,7 @@ export interface CampaignListItem {
   totalCount: number;
   sentCount: number;
   failedCount: number;
+  skippedCount: number;
 }
 
 export interface CampaignSummary extends CampaignListItem {
@@ -79,7 +81,7 @@ export async function createCampaign({ drafts, config, durationHours, startAt }:
 
 export async function listCampaigns(limit = 50): Promise<CampaignListItem[]> {
   const rows = await sql`
-    SELECT id, status, created_at, window_start, window_end, total_count, sent_count, failed_count
+    SELECT id, status, created_at, window_start, window_end, total_count, sent_count, failed_count, skipped_count
     FROM campaigns
     ORDER BY created_at DESC
     LIMIT ${limit}
@@ -93,6 +95,7 @@ export async function listCampaigns(limit = 50): Promise<CampaignListItem[]> {
     totalCount: c.total_count as number,
     sentCount: c.sent_count as number,
     failedCount: c.failed_count as number,
+    skippedCount: c.skipped_count as number,
   }));
 }
 
@@ -101,7 +104,7 @@ export async function getCampaign(id: string): Promise<CampaignSummary | null> {
   if (!campaign) return null;
 
   const emails = await sql`
-    SELECT to_email, status, error, sent_at, scheduled_at
+    SELECT id, to_email, status, error, sent_at, scheduled_at
     FROM campaign_emails
     WHERE campaign_id = ${id}
     ORDER BY scheduled_at ASC
@@ -116,8 +119,10 @@ export async function getCampaign(id: string): Promise<CampaignSummary | null> {
     totalCount: campaign.total_count as number,
     sentCount: campaign.sent_count as number,
     failedCount: campaign.failed_count as number,
+    skippedCount: campaign.skipped_count as number,
     consecutiveFailures: campaign.consecutive_failures as number,
     emails: emails.map((e) => ({
+      id: e.id as string,
       email: e.to_email as string,
       status: e.status as CampaignEmailStatus,
       error: (e.error as string | null) ?? null,
@@ -184,6 +189,34 @@ export async function restartCampaign(id: string, durationHours: number): Promis
     SET status = 'running', window_start = ${now.toISOString()}, window_end = ${windowEnd.toISOString()}, consecutive_failures = 0
     WHERE id = ${id}
   `;
+}
+
+// Pulls specific still-pending rows out of a running/paused campaign without
+// touching the rest — distinct from cancelCampaign (which takes out every
+// pending row) and tracked as its own status so these never get swept up by
+// restartCampaign (which only looks at 'canceled' rows).
+export async function skipCampaignEmails(campaignId: string, emailIds: string[]): Promise<number> {
+  const updated = await sql`
+    UPDATE campaign_emails SET status = 'skipped'
+    WHERE campaign_id = ${campaignId} AND status = 'pending' AND id = ANY(${emailIds}::uuid[])
+    RETURNING id
+  `;
+  if (updated.length === 0) return 0;
+
+  await sql`UPDATE campaigns SET skipped_count = skipped_count + ${updated.length} WHERE id = ${campaignId}`;
+
+  // Mirrors the same "did this empty out the remaining queue" check at the
+  // end of recordEmailResult, so skipping the last pending rows correctly
+  // flips the campaign to completed instead of leaving it stuck at 'running'
+  // with nothing left to claim.
+  const [remaining] = await sql`
+    SELECT count(*)::int AS n FROM campaign_emails WHERE campaign_id = ${campaignId} AND status IN ('pending', 'sending')
+  `;
+  if ((remaining.n as number) === 0) {
+    await sql`UPDATE campaigns SET status = 'completed' WHERE id = ${campaignId} AND status = 'running'`;
+  }
+
+  return updated.length;
 }
 
 export interface DueEmail {

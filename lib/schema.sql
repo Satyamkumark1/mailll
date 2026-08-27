@@ -14,11 +14,13 @@ CREATE TABLE IF NOT EXISTS campaigns (
   total_count INT NOT NULL,
   sent_count INT NOT NULL DEFAULT 0,
   failed_count INT NOT NULL DEFAULT 0,
-  consecutive_failures INT NOT NULL DEFAULT 0
+  consecutive_failures INT NOT NULL DEFAULT 0,
+  skipped_count INT NOT NULL DEFAULT 0
 );
--- Re-run this against an already-provisioned database — CREATE TABLE IF NOT
--- EXISTS above won't add the column to a table that already exists.
+-- Re-run these against an already-provisioned database — CREATE TABLE IF NOT
+-- EXISTS above won't add a column to a table that already exists.
 ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS consecutive_failures INT NOT NULL DEFAULT 0;
+ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS skipped_count INT NOT NULL DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS campaign_emails (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -28,7 +30,7 @@ CREATE TABLE IF NOT EXISTS campaign_emails (
   body TEXT NOT NULL,
   html TEXT NOT NULL,
   scheduled_at TIMESTAMPTZ NOT NULL,
-  status TEXT NOT NULL DEFAULT 'pending', -- pending | sending | sent | failed | canceled
+  status TEXT NOT NULL DEFAULT 'pending', -- pending | sending | sent | failed | canceled | skipped
   error TEXT,
   sent_at TIMESTAMPTZ
 );

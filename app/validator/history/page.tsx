@@ -76,13 +76,14 @@ export default function HistoryPage() {
     [confirmAction]
   );
 
-  // For a canceled campaign, totalCount - sentCount - failedCount is exactly
-  // the count of rows still sitting at status 'canceled' (cancelCampaign()
-  // flips every non-terminal row to 'canceled'), so no extra field is needed
-  // on CampaignListView to know whether there's anything left to restart.
+  // For a canceled campaign, totalCount - sentCount - failedCount - skippedCount
+  // is exactly the count of rows still sitting at status 'canceled'
+  // (cancelCampaign() flips every pending row to 'canceled', but leaves any
+  // already-skipped rows alone) — so no extra field is needed on
+  // CampaignListView to know whether there's anything left to restart.
   const restartCampaignFromHistory = useCallback(
     async (c: CampaignListView) => {
-      const remaining = c.totalCount - c.sentCount - c.failedCount;
+      const remaining = c.totalCount - c.sentCount - c.failedCount - c.skippedCount;
       if (remaining <= 0) return;
       const durationHours = computeMinDurationHours(remaining, rateLimitStatus?.hourly.cap ?? 35);
       const confirmed = await confirmAction(
@@ -152,10 +153,10 @@ export default function HistoryPage() {
                     </span>
                   </td>
                   <td className="px-md py-md text-xs text-on-surface font-mono">
-                    {c.sentCount + c.failedCount} / {c.totalCount} processed
+                    {c.sentCount + c.failedCount + c.skippedCount} / {c.totalCount} processed
                     {c.failedCount > 0 && <span className="ml-sm text-red-400 font-bold">{c.failedCount} failed</span>}
                     {c.status === "running" &&
-                      c.totalCount - c.sentCount - c.failedCount > 0 &&
+                      c.totalCount - c.sentCount - c.failedCount - c.skippedCount > 0 &&
                       rateLimitStatus &&
                       !rateLimitStatus.allowed && (
                         <span
@@ -182,7 +183,7 @@ export default function HistoryPage() {
                           Cancel
                         </button>
                       )}
-                      {c.status === "canceled" && c.totalCount - c.sentCount - c.failedCount > 0 && (
+                      {c.status === "canceled" && c.totalCount - c.sentCount - c.failedCount - c.skippedCount > 0 && (
                         <button
                           onClick={() => restartCampaignFromHistory(c)}
                           className="rounded-lg border border-primary/40 bg-primary/10 px-sm py-xs text-xs font-bold text-primary transition-colors hover:bg-primary/20 cursor-pointer"

@@ -10,6 +10,7 @@ import {
   getCampaignStatus,
   resumeBackgroundCampaign,
   restartBackgroundCampaign,
+  skipCampaignEmails,
   CAMPAIGN_ID_STORAGE_KEY,
   CAMPAIGN_POLL_MS,
   type CampaignView,
@@ -38,6 +39,7 @@ const CAMPAIGN_EMAIL_STATUS_STYLES: Record<CampaignView["emails"][number]["statu
   sent: "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20",
   failed: "bg-red-500/10 text-red-400 border border-red-500/20",
   canceled: "bg-on-surface-variant/10 text-on-surface-variant border border-outline",
+  skipped: "bg-on-surface-variant/10 text-on-surface-variant border border-outline",
 };
 
 export default function SendPage() {
@@ -59,9 +61,30 @@ export default function SendPage() {
   const [isSchedulingCampaign, setIsSchedulingCampaign] = useState(false);
   const [startMode, setStartMode] = useState<"now" | "at">("now");
   const [startAtLocal, setStartAtLocal] = useState("");
+  const [excludedEmails, setExcludedEmails] = useState<Set<string>>(new Set());
+  const [recipientSearch, setRecipientSearch] = useState("");
+  const [selectedToSkip, setSelectedToSkip] = useState<Set<string>>(new Set());
+  const [isSkippingEmails, setIsSkippingEmails] = useState(false);
 
   const validContacts = useMemo(() => results.filter((r) => r.status === "valid"), [results]);
   const draftsStale = useMemo(() => computeDraftsStale(validContacts, drafts), [validContacts, drafts]);
+  // The set actually being sent/scheduled this run — everything else in this
+  // file that decides *what* or *how many* to send reads this, not `drafts`
+  // directly, so a recipient someone unchecked below is genuinely excluded.
+  const includedDrafts = useMemo(() => drafts.filter((d) => !excludedEmails.has(d.email)), [drafts, excludedEmails]);
+  const filteredRecipientDrafts = useMemo(() => {
+    const q = recipientSearch.trim().toLowerCase();
+    if (!q) return drafts;
+    return drafts.filter(
+      (d) => d.email.toLowerCase().includes(q) || d.brand.toLowerCase().includes(q) || d.pocName.toLowerCase().includes(q)
+    );
+  }, [drafts, recipientSearch]);
+  // Locked for the whole lifetime of a "send now" run, including while it's
+  // paused after consecutive failures — sendPausedReason alone still means
+  // isSending is false (sendDraftsPaced returns on pause), but resumeSend
+  // slices includedDrafts positionally against sendResults.length, so the
+  // included set must not change until that run is fully done or dismissed.
+  const recipientsLocked = isSending || isSchedulingCampaign || !!sendPausedReason;
 
   // Polled (not just fetch-once) so a page left open — e.g. watching a
   // background campaign that's currently rate-limited — stays accurate
@@ -110,7 +133,7 @@ export default function SendPage() {
   // the shortest duration that still keeps a human-ish pace and respects
   // the hourly cap, and only override it once the user actually edits the
   // field. See lib/campaign-schedule.ts.
-  const minCampaignHours = computeMinDurationHours(drafts.length, rateLimitStatus?.hourly.cap ?? 35);
+  const minCampaignHours = computeMinDurationHours(includedDrafts.length, rateLimitStatus?.hourly.cap ?? 35);
   const effectiveDurationHours = durationTouched && durationHours !== null ? durationHours : minCampaignHours;
 
   // Pure — just checks the picked value parses, no time-dependent
@@ -139,7 +162,7 @@ export default function SendPage() {
           )} — the campaign will queue and catch up automatically as capacity frees up.`
         : "";
     const confirmed = await confirmAction(
-      `This will schedule ${drafts.length} real email(s) to send from your Gmail account, ${startDescription}, spread over ${formatDurationHours(effectiveDurationHours)}, ` +
+      `This will schedule ${includedDrafts.length} real email(s) to send from your Gmail account, ${startDescription}, spread over ${formatDurationHours(effectiveDurationHours)}, ` +
         `continuing on the server even if you close this tab. This cannot be undone once sent.${rateLimitNote} Continue?`,
       { title: "Schedule background campaign?", confirmLabel: "Schedule campaign", tone: "primary" }
     );
@@ -149,7 +172,7 @@ export default function SendPage() {
     setCampaignError(null);
     try {
       const { id } = await createBackgroundCampaign(
-        drafts,
+        includedDrafts,
         outreachConfig,
         effectiveDurationHours,
         resolvedStartAt ? resolvedStartAt.toISOString() : undefined
@@ -162,7 +185,7 @@ export default function SendPage() {
     } finally {
       setIsSchedulingCampaign(false);
     }
-  }, [drafts, outreachConfig, effectiveDurationHours, startMode, resolvedStartAt, rateLimitStatus, setActiveCampaignId, refreshCampaign, confirmAction]);
+  }, [includedDrafts, outreachConfig, effectiveDurationHours, startMode, resolvedStartAt, rateLimitStatus, setActiveCampaignId, refreshCampaign, confirmAction]);
 
   const cancelCampaign = useCallback(async () => {
     if (!activeCampaignId) return;
@@ -213,17 +236,41 @@ export default function SendPage() {
     }
   }, [activeCampaignId, campaign, rateLimitStatus, refreshCampaign, confirmAction]);
 
+  const skipSelectedEmails = useCallback(async () => {
+    if (!activeCampaignId || selectedToSkip.size === 0) return;
+    const count = selectedToSkip.size;
+    const confirmed = await confirmAction(
+      `Skip ${count} email(s)? They will not be sent as part of this campaign.`,
+      { title: "Skip selected emails?", confirmLabel: "Skip selected", tone: "danger" }
+    );
+    if (!confirmed) return;
+    setIsSkippingEmails(true);
+    try {
+      await skipCampaignEmails(activeCampaignId, [...selectedToSkip]);
+      setSelectedToSkip(new Set());
+      await refreshCampaign(activeCampaignId);
+    } catch (err) {
+      setCampaignError(err instanceof Error ? err.message : "Failed to skip email(s)");
+    } finally {
+      setIsSkippingEmails(false);
+    }
+  }, [activeCampaignId, selectedToSkip, refreshCampaign, confirmAction]);
+
   const dismissCampaign = useCallback(() => {
     window.localStorage.removeItem(CAMPAIGN_ID_STORAGE_KEY);
     setActiveCampaignId(null);
     setCampaign(null);
+    setSelectedToSkip(new Set());
   }, [setActiveCampaignId]);
 
   // Shared by a fresh run (startSend) and continuing after a consecutive-
   // failure pause (resumeSend) — startDone lets a resumed run keep counting
   // progress against the original total instead of restarting the bar.
+  // `total` is passed explicitly (rather than reading drafts.length) because
+  // the run's real total is whatever subset of drafts was actually included
+  // (see includedDrafts) — it can be smaller than the full drafts list.
   const runSendLoop = useCallback(
-    async (toSend: DraftResult[], startDone: number) => {
+    async (toSend: DraftResult[], startDone: number, total: number) => {
       const { minSec, maxSec } = PACING_PRESETS[pacing];
       setSendCancelRequested(false);
       setSending(true);
@@ -234,7 +281,7 @@ export default function SendPage() {
         outreachConfig,
         minSec * 1000,
         maxSec * 1000,
-        (done) => setSendProgress(startDone + done, drafts.length),
+        (done) => setSendProgress(startDone + done, total),
         (result) => appendSendResults([result]),
         // Read fresh from the store (not a closed-over ref) — this loop is a
         // detached async chain that outlives this component: if the user
@@ -270,7 +317,6 @@ export default function SendPage() {
       getSendRateStatus().then(setRateLimitStatus).catch(() => {});
     },
     [
-      drafts,
       outreachConfig,
       pacing,
       setSending,
@@ -286,29 +332,29 @@ export default function SendPage() {
 
   const startSend = useCallback(async () => {
     const { minSec, maxSec } = PACING_PRESETS[pacing];
-    const totalMinSec = drafts.length * minSec;
-    const totalMaxSec = drafts.length * maxSec;
+    const totalMinSec = includedDrafts.length * minSec;
+    const totalMaxSec = includedDrafts.length * maxSec;
     const durationEstimate =
       totalMaxSec < 60
         ? `${totalMinSec}-${totalMaxSec}s`
         : `${Math.round(totalMinSec / 60)}-${Math.round(totalMaxSec / 60)} min`;
     const confirmed = await confirmAction(
-      `This will send ${drafts.length} real email(s) from your Gmail account, paced ${minSec}-${maxSec}s apart ` +
+      `This will send ${includedDrafts.length} real email(s) from your Gmail account, paced ${minSec}-${maxSec}s apart ` +
         `(roughly ${durationEstimate} total). This cannot be undone once sent. Continue?`,
       { title: "Send outreach now?", confirmLabel: "Send now", tone: "primary" }
     );
     if (!confirmed) return;
 
     clearSendResults();
-    setSendProgress(0, drafts.length);
-    await runSendLoop(drafts, 0);
-  }, [drafts, pacing, clearSendResults, setSendProgress, runSendLoop, confirmAction]);
+    setSendProgress(0, includedDrafts.length);
+    await runSendLoop(includedDrafts, 0, includedDrafts.length);
+  }, [includedDrafts, pacing, clearSendResults, setSendProgress, runSendLoop, confirmAction]);
 
   const resumeSend = useCallback(async () => {
-    const remaining = drafts.slice(sendResults.length);
+    const remaining = includedDrafts.slice(sendResults.length);
     if (remaining.length === 0) return;
-    await runSendLoop(remaining, sendResults.length);
-  }, [drafts, sendResults, runSendLoop]);
+    await runSendLoop(remaining, sendResults.length, includedDrafts.length);
+  }, [includedDrafts, sendResults, runSendLoop]);
 
   const dismissSendPause = useCallback(() => {
     setSendPausedReason(null);
@@ -469,14 +515,19 @@ export default function SendPage() {
           {renderCampaignStallNotice()}
           <div>
             <div className="mb-2 flex justify-between text-xs font-mono text-primary font-bold">
-              <span>{campaign.sentCount + campaign.failedCount} / {campaign.totalCount} processed</span>
-              <span>{campaign.failedCount > 0 ? `${campaign.failedCount} failed` : ""}</span>
+              <span>{campaign.sentCount + campaign.failedCount + campaign.skippedCount} / {campaign.totalCount} processed</span>
+              <span>
+                {campaign.failedCount > 0 ? `${campaign.failedCount} failed` : ""}
+                {campaign.skippedCount > 0 ? `${campaign.failedCount > 0 ? " · " : ""}${campaign.skippedCount} skipped` : ""}
+              </span>
             </div>
             <div className="h-2 w-full bg-surface-container rounded-full overflow-hidden">
               <motion.div
                 className="h-full bg-primary"
                 animate={{
-                  width: campaign.totalCount ? `${((campaign.sentCount + campaign.failedCount) / campaign.totalCount) * 100}%` : "0%",
+                  width: campaign.totalCount
+                    ? `${((campaign.sentCount + campaign.failedCount + campaign.skippedCount) / campaign.totalCount) * 100}%`
+                    : "0%",
                 }}
                 transition={{ duration: 0.2 }}
               />
@@ -513,42 +564,92 @@ export default function SendPage() {
             </div>
           )}
           {campaign.emails.length > 0 && (
-            <div className="max-h-72 overflow-y-auto rounded-lg border border-outline/50">
-              <table className="w-full border-collapse text-left text-body-sm">
-                <thead className="sticky top-0 bg-surface-container border-b border-outline select-none">
-                  <tr>
-                    <th className="px-md py-sm text-[10px] font-bold uppercase tracking-wider text-on-surface-variant">Email Address</th>
-                    <th className="px-md py-sm text-[10px] font-bold uppercase tracking-wider text-on-surface-variant">Status</th>
-                    <th className="px-md py-sm text-[10px] font-bold uppercase tracking-wider text-on-surface-variant">Scheduled</th>
-                    <th className="px-md py-sm text-[10px] font-bold uppercase tracking-wider text-on-surface-variant">Detail</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-outline/40">
-                  {campaign.emails.map((e) => (
-                    <tr key={e.email} className="hover:bg-surface-container/20">
-                      <td className="px-md py-sm font-mono text-[11px] text-on-surface">{e.email}</td>
-                      <td className="px-md py-sm select-none">
-                        <span className={cn("rounded px-sm py-[2px] text-[10px] font-bold uppercase inline-block text-center", CAMPAIGN_EMAIL_STATUS_STYLES[e.status])}>
-                          {e.status}
-                        </span>
-                      </td>
-                      <td className="px-md py-sm font-mono text-[11px] text-on-surface-variant">
-                        {new Date(e.scheduledAt).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}
-                      </td>
-                      <td className="px-md py-sm text-xs text-on-surface-variant/90 leading-relaxed">
-                        {e.error
-                          ? e.error
-                          : e.sentAt
-                          ? `Sent ${new Date(e.sentAt).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}`
-                          : e.status === "pending" && rateLimitStatus && !rateLimitStatus.allowed
-                          ? `Waiting — send cap reached, resumes in about ${formatRetryAfter(rateLimitStatus.retryAfterSeconds)}`
-                          : "Waiting for its scheduled slot"}
-                      </td>
+            <>
+              {campaign.emails.some((e) => e.status === "pending") && (
+                <div className="flex flex-wrap items-center gap-sm">
+                  <button
+                    onClick={() =>
+                      setSelectedToSkip(new Set(campaign.emails.filter((e) => e.status === "pending").map((e) => e.id)))
+                    }
+                    disabled={isSkippingEmails}
+                    className="text-xs font-bold text-on-surface-variant hover:text-on-surface transition-colors cursor-pointer disabled:opacity-50"
+                  >
+                    Select all pending
+                  </button>
+                  <button
+                    onClick={() => setSelectedToSkip(new Set())}
+                    disabled={isSkippingEmails || selectedToSkip.size === 0}
+                    className="text-xs font-bold text-on-surface-variant hover:text-on-surface transition-colors cursor-pointer disabled:opacity-50"
+                  >
+                    Clear selection
+                  </button>
+                  <button
+                    onClick={skipSelectedEmails}
+                    disabled={isSkippingEmails || selectedToSkip.size === 0}
+                    className="ml-auto rounded-lg border border-red-500/25 bg-red-500/10 px-sm py-xs text-xs font-bold text-red-300 transition-colors hover:bg-red-500/20 cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {isSkippingEmails ? "Skipping..." : `Skip selected (${selectedToSkip.size})`}
+                  </button>
+                </div>
+              )}
+              <div className="max-h-72 overflow-y-auto rounded-lg border border-outline/50">
+                <table className="w-full border-collapse text-left text-body-sm">
+                  <thead className="sticky top-0 bg-surface-container border-b border-outline select-none">
+                    <tr>
+                      <th className="w-10 px-md py-sm"></th>
+                      <th className="px-md py-sm text-[10px] font-bold uppercase tracking-wider text-on-surface-variant">Email Address</th>
+                      <th className="px-md py-sm text-[10px] font-bold uppercase tracking-wider text-on-surface-variant">Status</th>
+                      <th className="px-md py-sm text-[10px] font-bold uppercase tracking-wider text-on-surface-variant">Scheduled</th>
+                      <th className="px-md py-sm text-[10px] font-bold uppercase tracking-wider text-on-surface-variant">Detail</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                  </thead>
+                  <tbody className="divide-y divide-outline/40">
+                    {campaign.emails.map((e) => (
+                      <tr key={e.id} className="hover:bg-surface-container/20">
+                        <td className="px-md py-sm">
+                          {e.status === "pending" && (
+                            <input
+                              type="checkbox"
+                              checked={selectedToSkip.has(e.id)}
+                              disabled={isSkippingEmails}
+                              onChange={(event) =>
+                                setSelectedToSkip((prev) => {
+                                  const next = new Set(prev);
+                                  if (event.target.checked) next.add(e.id);
+                                  else next.delete(e.id);
+                                  return next;
+                                })
+                              }
+                              className="h-4 w-4 cursor-pointer accent-primary disabled:cursor-not-allowed"
+                            />
+                          )}
+                        </td>
+                        <td className="px-md py-sm font-mono text-[11px] text-on-surface">{e.email}</td>
+                        <td className="px-md py-sm select-none">
+                          <span className={cn("rounded px-sm py-[2px] text-[10px] font-bold uppercase inline-block text-center", CAMPAIGN_EMAIL_STATUS_STYLES[e.status])}>
+                            {e.status}
+                          </span>
+                        </td>
+                        <td className="px-md py-sm font-mono text-[11px] text-on-surface-variant">
+                          {new Date(e.scheduledAt).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}
+                        </td>
+                        <td className="px-md py-sm text-xs text-on-surface-variant/90 leading-relaxed">
+                          {e.error
+                            ? e.error
+                            : e.sentAt
+                            ? `Sent ${new Date(e.sentAt).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}`
+                            : e.status === "skipped"
+                            ? "Skipped — won't be sent"
+                            : e.status === "pending" && rateLimitStatus && !rateLimitStatus.allowed
+                            ? `Waiting — send cap reached, resumes in about ${formatRetryAfter(rateLimitStatus.retryAfterSeconds)}`
+                            : "Waiting for its scheduled slot"}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
           )}
         </div>
       )}
@@ -557,6 +658,89 @@ export default function SendPage() {
         <div className="flex items-start gap-sm rounded-xl border border-red-500/20 bg-red-500/10 px-md py-sm text-body-sm text-red-400">
           <Icon name="error" className="text-[18px]" />
           <span>{campaignError}</span>
+        </div>
+      )}
+
+      {drafts.length > 0 && (
+        <div className="rounded-xl border border-outline bg-surface p-lg shadow-sm space-y-md">
+          <div className="flex flex-wrap items-center justify-between gap-sm">
+            <div>
+              <span className="text-[10px] font-bold text-on-surface-variant uppercase tracking-wider">Recipients</span>
+              <p className="mt-0.5 text-xs text-on-surface-variant">
+                {includedDrafts.length} of {drafts.length} selected to send — uncheck anyone you want to skip this run.
+              </p>
+            </div>
+            <div className="flex items-center gap-sm">
+              <div className="relative">
+                <Icon name="search" className="pointer-events-none absolute left-sm top-1/2 -translate-y-1/2 text-[16px] text-on-surface-variant" />
+                <input
+                  value={recipientSearch}
+                  onChange={(e) => setRecipientSearch(e.target.value)}
+                  placeholder="Search recipients…"
+                  disabled={recipientsLocked}
+                  className="w-48 rounded-lg border border-outline bg-surface-container-low py-sm pl-8 pr-md text-xs text-on-surface outline-none transition-all focus:border-primary focus:w-60 focus:ring-1 focus:ring-primary/20 disabled:opacity-50"
+                />
+              </div>
+              <button
+                onClick={() => setExcludedEmails(new Set())}
+                disabled={recipientsLocked}
+                className="rounded-lg border border-outline bg-surface-container-low px-sm py-xs text-xs font-bold text-on-surface-variant hover:text-on-surface transition-colors cursor-pointer disabled:opacity-50"
+              >
+                Select all
+              </button>
+              <button
+                onClick={() => setExcludedEmails(new Set(drafts.map((d) => d.email)))}
+                disabled={recipientsLocked}
+                className="rounded-lg border border-outline bg-surface-container-low px-sm py-xs text-xs font-bold text-on-surface-variant hover:text-on-surface transition-colors cursor-pointer disabled:opacity-50"
+              >
+                Select none
+              </button>
+            </div>
+          </div>
+          <div className="max-h-72 overflow-y-auto rounded-lg border border-outline/50">
+            <table className="w-full border-collapse text-left text-body-sm">
+              <thead className="sticky top-0 bg-surface-container border-b border-outline select-none">
+                <tr>
+                  <th className="w-10 px-md py-sm"></th>
+                  <th className="px-md py-sm text-[10px] font-bold uppercase tracking-wider text-on-surface-variant">Email Address</th>
+                  <th className="px-md py-sm text-[10px] font-bold uppercase tracking-wider text-on-surface-variant">Brand / Contact</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-outline/40">
+                {filteredRecipientDrafts.map((d) => (
+                  <tr key={d.email} className="hover:bg-surface-container/20">
+                    <td className="px-md py-sm">
+                      <input
+                        type="checkbox"
+                        checked={!excludedEmails.has(d.email)}
+                        disabled={recipientsLocked}
+                        onChange={(e) =>
+                          setExcludedEmails((prev) => {
+                            const next = new Set(prev);
+                            if (e.target.checked) next.delete(d.email);
+                            else next.add(d.email);
+                            return next;
+                          })
+                        }
+                        className="h-4 w-4 cursor-pointer accent-primary disabled:cursor-not-allowed"
+                      />
+                    </td>
+                    <td className="px-md py-sm font-mono text-[11px] text-on-surface">{d.email}</td>
+                    <td className="px-md py-sm text-xs text-on-surface-variant">
+                      {[d.pocName, d.brand].filter(Boolean).join(" · ") || "—"}
+                    </td>
+                  </tr>
+                ))}
+                {filteredRecipientDrafts.length === 0 && (
+                  <tr>
+                    <td colSpan={3} className="py-lg text-center font-mono text-xs text-on-surface-variant">
+                      No recipients match your search.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
 
@@ -634,7 +818,7 @@ export default function SendPage() {
                 disabled={isSchedulingCampaign}
                 className="w-28 rounded-lg border border-outline bg-surface-container-low px-md py-sm text-body-sm text-on-surface font-mono"
               />
-              <span className="text-body-sm text-on-surface-variant">hours (minimum {formatDurationHours(minCampaignHours)} for {drafts.length} email(s))</span>
+              <span className="text-body-sm text-on-surface-variant">hours (minimum {formatDurationHours(minCampaignHours)} for {includedDrafts.length} email(s))</span>
             </div>
             <p className="mt-sm text-xs text-on-surface-variant font-medium">
               A small batch defaults to a quick, human-paced send rather than being stretched out — the minimum above already keeps a safe gap between sends. Sends are spaced evenly across whatever window you pick; if the hourly/daily cap is hit, remaining emails wait for the next opening rather than being dropped.
@@ -644,11 +828,11 @@ export default function SendPage() {
           {renderRateLimitNotice("schedule")}
           <button
             onClick={scheduleCampaign}
-            disabled={isSchedulingCampaign || drafts.length === 0 || draftsStale || startAtMissing || (campaign?.status === "running" || campaign?.status === "paused") || !settingsView?.configured}
+            disabled={isSchedulingCampaign || includedDrafts.length === 0 || draftsStale || startAtMissing || (campaign?.status === "running" || campaign?.status === "paused") || !settingsView?.configured}
             className="flex items-center gap-sm rounded-lg bg-primary px-lg py-md text-label-md font-extrabold text-on-primary shadow-lg shadow-primary/20 transition-all hover:scale-[1.02] active:scale-95 disabled:opacity-50 cursor-pointer"
           >
             <Icon name="schedule_send" className="text-[18px]" />
-            {isSchedulingCampaign ? "Scheduling..." : `Schedule ${drafts.length} email(s) over ${formatDurationHours(effectiveDurationHours)}`}
+            {isSchedulingCampaign ? "Scheduling..." : `Schedule ${includedDrafts.length} email(s) over ${formatDurationHours(effectiveDurationHours)}`}
           </button>
         </div>
       ) : (
@@ -687,7 +871,7 @@ export default function SendPage() {
                   onClick={resumeSend}
                   className="rounded-lg bg-primary px-md py-xs text-xs font-extrabold text-on-primary shadow-sm transition-opacity hover:opacity-95 cursor-pointer"
                 >
-                  Resume sending ({drafts.length - sendResults.length} left)
+                  Resume sending ({includedDrafts.length - sendResults.length} left)
                 </button>
                 <button
                   onClick={dismissSendPause}
@@ -738,10 +922,12 @@ export default function SendPage() {
         <div className="mt-md flex gap-md">
           <button
             onClick={startSend}
-            disabled={isSending || !!sendPausedReason || drafts.length === 0 || draftsStale || (rateLimitStatus ? !rateLimitStatus.allowed : false) || !settingsView?.configured}
+            disabled={isSending || !!sendPausedReason || includedDrafts.length === 0 || draftsStale || (rateLimitStatus ? !rateLimitStatus.allowed : false) || !settingsView?.configured}
             title={
               draftsStale
                 ? "Regenerate drafts to include newly-approved contacts before sending"
+                : includedDrafts.length === 0
+                ? "Select at least one recipient to send to"
                 : rateLimitStatus && !rateLimitStatus.allowed
                 ? `Send rate limit reached — resumes in about ${formatRetryAfter(rateLimitStatus.retryAfterSeconds)}`
                 : undefined
@@ -749,7 +935,7 @@ export default function SendPage() {
             className="flex items-center gap-sm rounded-lg bg-primary px-lg py-md text-label-md font-extrabold text-on-primary shadow-lg shadow-primary/20 transition-all hover:scale-[1.02] active:scale-95 disabled:opacity-50 cursor-pointer"
           >
             <Icon name="send" className="text-[18px]" />
-            {isSending ? "Sending outbox..." : `Launch Outreach Run (${drafts.length})`}
+            {isSending ? "Sending outbox..." : `Launch Outreach Run (${includedDrafts.length})`}
           </button>
           {isSending && (
             <button
