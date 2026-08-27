@@ -70,7 +70,7 @@ export default function ValidatorLayout({ children }: { children: React.ReactNod
   const router = useRouter();
   const segment = useSelectedLayoutSegment() as Tab | null;
 
-  const { emails, results, drafts, sendResults, activeCampaignId, isValidating, isSending, error, reset } =
+  const { emails, results, drafts, activeCampaignId, isValidating, error, reset } =
     useValidatorStore();
   const validContacts = useMemo(() => results.filter((r) => r.status === "valid"), [results]);
   const draftsStale = useMemo(() => computeDraftsStale(validContacts, drafts), [validContacts, drafts]);
@@ -95,7 +95,7 @@ export default function ValidatorLayout({ children }: { children: React.ReactNod
     validate: results.length > 0,
     results: results.length > 0,
     draft: drafts.length > 0,
-    send: sendResults.length > 0,
+    send: false,
     export: false,
     history: false,
   };
@@ -284,7 +284,7 @@ export default function ValidatorLayout({ children }: { children: React.ReactNod
 
                 {/* Stepper connecting rail (quieter signal path) */}
                 <div className="absolute left-6 right-6 top-1/2 -translate-y-1/2 h-[2px] bg-outline z-0 overflow-hidden">
-                  {(isValidating || isSending) && (
+                  {isValidating && (
                     <div className="absolute inset-0 bg-primary/25 animate-signal-flow w-full h-full" style={{ strokeDasharray: "6 6" }} />
                   )}
                 </div>

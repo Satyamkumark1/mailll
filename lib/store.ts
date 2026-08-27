@@ -64,18 +64,9 @@ export const ELEVIQUE_OUTREACH_CONFIG: OutreachConfig = {
 
 export const EMPTY_OUTREACH_CONFIG: OutreachConfig = ELEVIQUE_OUTREACH_CONFIG;
 
-export type SendStatus = "sent" | "failed";
-
-export interface SendResult {
-  email: string;
-  status: SendStatus;
-  error?: string;
-}
-
-// Shared by both send engines (the in-browser paced loop in
-// lib/email-sender.ts and the DB-backed background campaign in
-// lib/campaigns.ts) — back-to-back failures at this count means something
-// is actually broken (bad creds, blocked domain), not routine throttling.
+// Back-to-back failures at this count in a background campaign means
+// something is actually broken (bad creds, blocked domain), not routine
+// throttling — see recordEmailResult/skipCampaignEmails in lib/campaigns.ts.
 export const MAX_CONSECUTIVE_SEND_FAILURES = 2;
 
 export type Tab = "upload" | "validate" | "results" | "draft" | "send" | "export" | "history";
@@ -93,14 +84,7 @@ interface ValidatorState {
   draftProgress: { done: number; total: number };
   draftError: string | null;
   outreachConfig: OutreachConfig;
-  sendResults: SendResult[];
-  isSending: boolean;
-  sendProgress: { done: number; total: number };
   rateLimitStatus: RateLimitStatus | null;
-  sendBlockedReason: string | null;
-  sendAutoResumeCountdown: number | null;
-  sendPausedReason: string | null;
-  sendCancelRequested: boolean;
   activeCampaignId: string | null;
   setActiveCampaignId: (id: string | null) => void;
   setEmails: (emails: EmailRow[]) => void;
@@ -119,15 +103,7 @@ interface ValidatorState {
   setDraftError: (msg: string | null) => void;
   clearDrafts: () => void;
   updateDraft: (email: string, patch: Partial<Pick<DraftResult, "subject" | "body">>) => void;
-  setSending: (v: boolean) => void;
-  setSendProgress: (done: number, total: number) => void;
-  appendSendResults: (batch: SendResult[]) => void;
-  clearSendResults: () => void;
   setRateLimitStatus: (status: RateLimitStatus | null) => void;
-  setSendBlockedReason: (reason: string | null) => void;
-  setSendAutoResumeCountdown: (sec: number | null) => void;
-  setSendPausedReason: (reason: string | null) => void;
-  setSendCancelRequested: (v: boolean) => void;
   reset: () => void;
 }
 
@@ -146,12 +122,7 @@ export const useValidatorStore = create<ValidatorState>((set) => ({
   outreachConfig: EMPTY_OUTREACH_CONFIG,
   sendResults: [],
   isSending: false,
-  sendProgress: { done: 0, total: 0 },
   rateLimitStatus: null,
-  sendBlockedReason: null,
-  sendAutoResumeCountdown: null,
-  sendPausedReason: null,
-  sendCancelRequested: false,
   activeCampaignId: null,
   setActiveCampaignId: (id) => set({ activeCampaignId: id }),
   setEmails: (emails) => set({ emails, results: [], error: null }),
@@ -188,22 +159,7 @@ export const useValidatorStore = create<ValidatorState>((set) => ({
     set((s) => ({
       drafts: s.drafts.map((d) => (d.email === email ? { ...d, ...patch } : d)),
     })),
-  setSending: (v) => set((s) => ({ isSending: v, sendAutoResumeCountdown: v ? s.sendAutoResumeCountdown : null })),
-  setSendProgress: (done, total) => set({ sendProgress: { done, total } }),
-  appendSendResults: (batch) => set((s) => ({ sendResults: [...s.sendResults, ...batch] })),
-  clearSendResults: () =>
-    set({
-      sendResults: [],
-      sendProgress: { done: 0, total: 0 },
-      sendBlockedReason: null,
-      sendAutoResumeCountdown: null,
-      sendPausedReason: null,
-    }),
   setRateLimitStatus: (status) => set({ rateLimitStatus: status }),
-  setSendBlockedReason: (reason) => set({ sendBlockedReason: reason }),
-  setSendAutoResumeCountdown: (sec) => set({ sendAutoResumeCountdown: sec }),
-  setSendPausedReason: (reason) => set({ sendPausedReason: reason }),
-  setSendCancelRequested: (v) => set({ sendCancelRequested: v }),
   reset: () =>
     set({
       emails: [],
@@ -217,13 +173,6 @@ export const useValidatorStore = create<ValidatorState>((set) => ({
       isDrafting: false,
       draftProgress: { done: 0, total: 0 },
       draftError: null,
-      sendResults: [],
-      isSending: false,
-      sendProgress: { done: 0, total: 0 },
       rateLimitStatus: null,
-      sendBlockedReason: null,
-      sendAutoResumeCountdown: null,
-      sendPausedReason: null,
-      sendCancelRequested: false,
     }),
 }));

@@ -30,7 +30,7 @@ export const TABS: { id: Tab; label: string; icon: string; description: string }
     id: "send",
     label: "Send",
     icon: "send",
-    description: "Paced sending straight from your own Gmail account — cancel mid-run anytime.",
+    description: "Schedule a background campaign — sends continue server-side even if you close the tab.",
   },
   {
     id: "export",

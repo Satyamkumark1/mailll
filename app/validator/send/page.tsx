@@ -16,22 +16,10 @@ import {
   type CampaignView,
 } from "@/lib/campaign-client";
 import { computeMinDurationHours, formatDurationHours } from "@/lib/campaign-schedule";
-import { getSendRateStatus, sendDraftsPaced } from "@/lib/email-sender";
+import { getSendRateStatus } from "@/lib/email-sender";
 import { describeRateLimitBlock, formatRetryAfter } from "@/lib/send-rate-limiter";
-import { useValidatorStore, type DraftResult, type SendStatus } from "@/lib/store";
+import { useValidatorStore } from "@/lib/store";
 import { cn, computeDraftsStale } from "@/lib/utils";
-
-const PACING_PRESETS = {
-  cautious: { label: "Cautious", minSec: 30, maxSec: 90, note: "Lowest risk of Gmail flagging bulk sends" },
-  balanced: { label: "Balanced", minSec: 10, maxSec: 25, note: "Faster, still randomized, moderate risk" },
-  fast: { label: "Fast", minSec: 3, maxSec: 8, note: "Meaningfully higher risk of Gmail flagging/limiting the account" },
-} as const;
-type PacingKey = keyof typeof PACING_PRESETS;
-
-const SEND_STATUS_STYLES: Record<SendStatus, string> = {
-  sent: "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20",
-  failed: "bg-red-500/10 text-red-400 border border-red-500/20",
-};
 
 const CAMPAIGN_EMAIL_STATUS_STYLES: Record<CampaignView["emails"][number]["status"], string> = {
   pending: "bg-on-surface-variant/10 text-on-surface-variant border border-outline",
@@ -44,16 +32,9 @@ const CAMPAIGN_EMAIL_STATUS_STYLES: Record<CampaignView["emails"][number]["statu
 
 export default function SendPage() {
   const { confirmAction, settingsView, openSettings } = useValidatorChrome();
-  const {
-    results, drafts, outreachConfig, sendResults, isSending, sendProgress,
-    rateLimitStatus, sendBlockedReason, sendAutoResumeCountdown, sendPausedReason, activeCampaignId,
-    setSending, setSendProgress, appendSendResults, clearSendResults, setRateLimitStatus,
-    setSendBlockedReason, setSendAutoResumeCountdown, setSendPausedReason, setActiveCampaignId,
-    setSendCancelRequested,
-  } = useValidatorStore();
+  const { results, drafts, outreachConfig, rateLimitStatus, activeCampaignId, setRateLimitStatus, setActiveCampaignId } =
+    useValidatorStore();
 
-  const [pacing, setPacing] = useState<PacingKey>("cautious");
-  const [sendMode, setSendMode] = useState<"now" | "schedule">("now");
   const [durationHours, setDurationHours] = useState<number | null>(null);
   const [durationTouched, setDurationTouched] = useState(false);
   const [campaign, setCampaign] = useState<CampaignView | null>(null);
@@ -68,9 +49,9 @@ export default function SendPage() {
 
   const validContacts = useMemo(() => results.filter((r) => r.status === "valid"), [results]);
   const draftsStale = useMemo(() => computeDraftsStale(validContacts, drafts), [validContacts, drafts]);
-  // The set actually being sent/scheduled this run — everything else in this
-  // file that decides *what* or *how many* to send reads this, not `drafts`
-  // directly, so a recipient someone unchecked below is genuinely excluded.
+  // The set actually scheduled — everything below that decides *what* or
+  // *how many* to send reads this, not `drafts` directly, so a recipient
+  // someone unchecked below is genuinely excluded.
   const includedDrafts = useMemo(() => drafts.filter((d) => !excludedEmails.has(d.email)), [drafts, excludedEmails]);
   const filteredRecipientDrafts = useMemo(() => {
     const q = recipientSearch.trim().toLowerCase();
@@ -79,12 +60,6 @@ export default function SendPage() {
       (d) => d.email.toLowerCase().includes(q) || d.brand.toLowerCase().includes(q) || d.pocName.toLowerCase().includes(q)
     );
   }, [drafts, recipientSearch]);
-  // Locked for the whole lifetime of a "send now" run, including while it's
-  // paused after consecutive failures — sendPausedReason alone still means
-  // isSending is false (sendDraftsPaced returns on pause), but resumeSend
-  // slices includedDrafts positionally against sendResults.length, so the
-  // included set must not change until that run is fully done or dismissed.
-  const recipientsLocked = isSending || isSchedulingCampaign || !!sendPausedReason;
 
   // Polled (not just fetch-once) so a page left open — e.g. watching a
   // background campaign that's currently rate-limited — stays accurate
@@ -263,109 +238,6 @@ export default function SendPage() {
     setSelectedToSkip(new Set());
   }, [setActiveCampaignId]);
 
-  // Shared by a fresh run (startSend) and continuing after a consecutive-
-  // failure pause (resumeSend) — startDone lets a resumed run keep counting
-  // progress against the original total instead of restarting the bar.
-  // `total` is passed explicitly (rather than reading drafts.length) because
-  // the run's real total is whatever subset of drafts was actually included
-  // (see includedDrafts) — it can be smaller than the full drafts list.
-  const runSendLoop = useCallback(
-    async (toSend: DraftResult[], startDone: number, total: number) => {
-      const { minSec, maxSec } = PACING_PRESETS[pacing];
-      setSendCancelRequested(false);
-      setSending(true);
-      setSendPausedReason(null);
-
-      await sendDraftsPaced(
-        toSend,
-        outreachConfig,
-        minSec * 1000,
-        maxSec * 1000,
-        (done) => setSendProgress(startDone + done, total),
-        (result) => appendSendResults([result]),
-        // Read fresh from the store (not a closed-over ref) — this loop is a
-        // detached async chain that outlives this component: if the user
-        // navigates away from /validator/send and back while a run is in
-        // flight, a component-local ref would leave the original run
-        // uncancellable, since the new mount's ref would be a different
-        // object. The store is the one thing both mounts actually share.
-        () => useValidatorStore.getState().sendCancelRequested,
-        (msg, retryAfterSec) => {
-          const resumeTime = new Date(Date.now() + retryAfterSec * 1000).toLocaleTimeString([], {
-            hour: "2-digit",
-            minute: "2-digit",
-          });
-          setSendBlockedReason(`${msg} Auto-resuming next batch around ${resumeTime}.`);
-          getSendRateStatus().then(setRateLimitStatus).catch(() => {});
-        },
-        true,
-        (sec) => {
-          setSendAutoResumeCountdown(sec);
-          if (sec === null) {
-            getSendRateStatus().then(setRateLimitStatus).catch(() => {});
-          }
-        },
-        (failCount) => {
-          setSendPausedReason(
-            `Sending paused after ${failCount} failed sends in a row. Check the delivery log below, then resume or dismiss.`
-          );
-        }
-      );
-
-      setSending(false);
-      setSendAutoResumeCountdown(null);
-      getSendRateStatus().then(setRateLimitStatus).catch(() => {});
-    },
-    [
-      outreachConfig,
-      pacing,
-      setSending,
-      setSendProgress,
-      appendSendResults,
-      setSendBlockedReason,
-      setRateLimitStatus,
-      setSendAutoResumeCountdown,
-      setSendPausedReason,
-      setSendCancelRequested,
-    ]
-  );
-
-  const startSend = useCallback(async () => {
-    const { minSec, maxSec } = PACING_PRESETS[pacing];
-    const totalMinSec = includedDrafts.length * minSec;
-    const totalMaxSec = includedDrafts.length * maxSec;
-    const durationEstimate =
-      totalMaxSec < 60
-        ? `${totalMinSec}-${totalMaxSec}s`
-        : `${Math.round(totalMinSec / 60)}-${Math.round(totalMaxSec / 60)} min`;
-    const confirmed = await confirmAction(
-      `This will send ${includedDrafts.length} real email(s) from your Gmail account, paced ${minSec}-${maxSec}s apart ` +
-        `(roughly ${durationEstimate} total). This cannot be undone once sent. Continue?`,
-      { title: "Send outreach now?", confirmLabel: "Send now", tone: "primary" }
-    );
-    if (!confirmed) return;
-
-    clearSendResults();
-    setSendProgress(0, includedDrafts.length);
-    await runSendLoop(includedDrafts, 0, includedDrafts.length);
-  }, [includedDrafts, pacing, clearSendResults, setSendProgress, runSendLoop, confirmAction]);
-
-  const resumeSend = useCallback(async () => {
-    const remaining = includedDrafts.slice(sendResults.length);
-    if (remaining.length === 0) return;
-    await runSendLoop(remaining, sendResults.length, includedDrafts.length);
-  }, [includedDrafts, sendResults, runSendLoop]);
-
-  const dismissSendPause = useCallback(() => {
-    setSendPausedReason(null);
-  }, [setSendPausedReason]);
-
-  const stopSend = useCallback(() => {
-    setSendCancelRequested(true);
-    setSendAutoResumeCountdown(null);
-    getSendRateStatus().then(setRateLimitStatus).catch(() => {});
-  }, [setRateLimitStatus, setSendAutoResumeCountdown, setSendCancelRequested]);
-
   const renderSenderStatus = () => {
     if (!settingsView) return null;
     if (!settingsView.configured) {
@@ -404,11 +276,9 @@ export default function SendPage() {
     );
   };
 
-  // "now" reads as urgent (sending is blocked right now, with an escape
-  // hatch to background scheduling instead); "schedule" reads as a reassuring
-  // heads-up, since a background campaign is designed to queue and wait —
-  // cap exhaustion there is expected, not an error.
-  const renderRateLimitNotice = (variant: "now" | "schedule") => {
+  // Reads as a reassuring heads-up, not an error — a background campaign is
+  // designed to queue and wait, so cap exhaustion here is expected.
+  const renderRateLimitNotice = () => {
     if (!rateLimitStatus) return null;
     if (rateLimitStatus.allowed) {
       return (
@@ -420,23 +290,6 @@ export default function SendPage() {
 
     const capDescription = describeRateLimitBlock(rateLimitStatus);
     const retryPhrase = formatRetryAfter(rateLimitStatus.retryAfterSeconds);
-
-    if (variant === "now") {
-      return (
-        <div className="flex items-center justify-between gap-sm rounded-lg border border-amber-500/25 bg-amber-500/10 px-md py-sm text-body-sm text-amber-200">
-          <span className="flex items-start gap-sm">
-            <Icon name="hourglass_top" className="mt-0.5 text-[18px]" />
-            <span>Send limit reached — you&apos;ve hit {capDescription}. Sending will resume automatically in about {retryPhrase}.</span>
-          </span>
-          <button
-            onClick={() => setSendMode("schedule")}
-            className="shrink-0 rounded-lg border border-amber-500/40 bg-amber-500/10 px-sm py-xs text-xs font-bold text-amber-200 hover:bg-amber-500/20 cursor-pointer"
-          >
-            Schedule instead
-          </button>
-        </div>
-      );
-    }
 
     return (
       <div className="flex items-start gap-sm rounded-lg border border-amber-500/20 bg-amber-500/5 px-md py-sm text-body-sm text-amber-200/90">
@@ -470,9 +323,9 @@ export default function SendPage() {
     <div className="space-y-lg">
       <div className="space-y-xs">
         <span className="text-[10px] font-bold text-primary uppercase tracking-wider">Stage 5 — Send</span>
-        <h1 className="text-headline-lg font-bold text-on-surface tracking-tight">Paced Sender Engine</h1>
+        <h1 className="text-headline-lg font-bold text-on-surface tracking-tight">Background Campaign Scheduler</h1>
         <p className="text-body-md text-on-surface-variant">
-          Send AI-composed outreach paced randomly to mimic human activity and protect sender reputation.
+          Schedule a paced background campaign — sending continues server-side even if you close this tab.
         </p>
       </div>
 
@@ -677,20 +530,20 @@ export default function SendPage() {
                   value={recipientSearch}
                   onChange={(e) => setRecipientSearch(e.target.value)}
                   placeholder="Search recipients…"
-                  disabled={recipientsLocked}
+                  disabled={isSchedulingCampaign}
                   className="w-48 rounded-lg border border-outline bg-surface-container-low py-sm pl-8 pr-md text-xs text-on-surface outline-none transition-all focus:border-primary focus:w-60 focus:ring-1 focus:ring-primary/20 disabled:opacity-50"
                 />
               </div>
               <button
                 onClick={() => setExcludedEmails(new Set())}
-                disabled={recipientsLocked}
+                disabled={isSchedulingCampaign}
                 className="rounded-lg border border-outline bg-surface-container-low px-sm py-xs text-xs font-bold text-on-surface-variant hover:text-on-surface transition-colors cursor-pointer disabled:opacity-50"
               >
                 Select all
               </button>
               <button
                 onClick={() => setExcludedEmails(new Set(drafts.map((d) => d.email)))}
-                disabled={recipientsLocked}
+                disabled={isSchedulingCampaign}
                 className="rounded-lg border border-outline bg-surface-container-low px-sm py-xs text-xs font-bold text-on-surface-variant hover:text-on-surface transition-colors cursor-pointer disabled:opacity-50"
               >
                 Select none
@@ -713,7 +566,7 @@ export default function SendPage() {
                       <input
                         type="checkbox"
                         checked={!excludedEmails.has(d.email)}
-                        disabled={recipientsLocked}
+                        disabled={isSchedulingCampaign}
                         onChange={(e) =>
                           setExcludedEmails((prev) => {
                             const next = new Set(prev);
@@ -744,238 +597,78 @@ export default function SendPage() {
         </div>
       )}
 
-      <div className="flex flex-wrap gap-xs">
-        {(["now", "schedule"] as const).map((mode) => (
-          <button
-            key={mode}
-            onClick={() => setSendMode(mode)}
-            disabled={isSending}
-            className={cn(
-              "rounded-lg px-md py-sm text-xs font-bold uppercase transition-all border cursor-pointer",
-              sendMode === mode
-                ? "bg-primary/10 border-primary text-primary"
-                : "bg-surface border-outline text-on-surface-variant hover:border-primary"
-            )}
-          >
-            {mode === "now" ? "Send now (keep tab open)" : "Schedule background campaign"}
-          </button>
-        ))}
-      </div>
-
-      {sendMode === "schedule" ? (
-        <div className="rounded-xl border border-outline bg-surface p-lg shadow-sm space-y-md">
-          {renderSenderStatus()}
-          <p className="text-xs text-on-surface-variant">
-            Also requires <code className="font-mono text-xs bg-surface-container px-1.5 py-0.5 rounded font-bold">DATABASE_URL</code> configured server-side, plus an external cron pinging{" "}
-            <code className="font-mono text-xs bg-surface-container px-1.5 py-0.5 rounded font-bold">/api/cron/tick</code> every minute.
-          </p>
-          <div className="pt-sm border-t border-outline/50">
-            <span className="text-[10px] font-bold text-on-surface-variant uppercase tracking-wider">Start</span>
-            <div className="mt-sm flex flex-wrap gap-xs">
-              {(["now", "at"] as const).map((mode) => (
-                <button
-                  key={mode}
-                  onClick={() => setStartMode(mode)}
-                  disabled={isSchedulingCampaign}
-                  className={cn(
-                    "rounded-lg px-md py-sm text-xs font-bold uppercase transition-all border cursor-pointer",
-                    startMode === mode
-                      ? "bg-primary/10 border-primary text-primary"
-                      : "bg-surface border-outline text-on-surface-variant hover:border-primary"
-                  )}
-                >
-                  {mode === "now" ? "Start now" : "Start at a specific time"}
-                </button>
-              ))}
-            </div>
-            {startMode === "at" && (
-              <div className="mt-sm">
-                <input
-                  type="datetime-local"
-                  value={startAtLocal}
-                  onChange={(e) => setStartAtLocal(e.target.value)}
-                  disabled={isSchedulingCampaign}
-                  className="rounded-lg border border-outline bg-surface-container-low px-md py-sm text-body-sm text-on-surface font-mono"
-                />
-                <p className="mt-xs text-xs text-on-surface-variant font-medium">
-                  Must be in the future. This persists on the server — it&apos;ll start at this time even if you close the browser or shut down your laptop before then.
-                </p>
-              </div>
-            )}
-          </div>
-          <div className="pt-sm border-t border-outline/50">
-            <span className="text-[10px] font-bold text-on-surface-variant uppercase tracking-wider">Spread sends over</span>
-            <div className="mt-sm flex items-center gap-sm">
-              <input
-                type="number"
-                min={minCampaignHours}
-                step="0.01"
-                value={Math.round(effectiveDurationHours * 100) / 100}
-                onChange={(e) => {
-                  setDurationHours(Math.max(minCampaignHours, Number(e.target.value) || minCampaignHours));
-                  setDurationTouched(true);
-                }}
-                disabled={isSchedulingCampaign}
-                className="w-28 rounded-lg border border-outline bg-surface-container-low px-md py-sm text-body-sm text-on-surface font-mono"
-              />
-              <span className="text-body-sm text-on-surface-variant">hours (minimum {formatDurationHours(minCampaignHours)} for {includedDrafts.length} email(s))</span>
-            </div>
-            <p className="mt-sm text-xs text-on-surface-variant font-medium">
-              A small batch defaults to a quick, human-paced send rather than being stretched out — the minimum above already keeps a safe gap between sends. Sends are spaced evenly across whatever window you pick; if the hourly/daily cap is hit, remaining emails wait for the next opening rather than being dropped.
-            </p>
-            {renderWarmupNotice()}
-          </div>
-          {renderRateLimitNotice("schedule")}
-          <button
-            onClick={scheduleCampaign}
-            disabled={isSchedulingCampaign || includedDrafts.length === 0 || draftsStale || startAtMissing || (campaign?.status === "running" || campaign?.status === "paused") || !settingsView?.configured}
-            className="flex items-center gap-sm rounded-lg bg-primary px-lg py-md text-label-md font-extrabold text-on-primary shadow-lg shadow-primary/20 transition-all hover:scale-[1.02] active:scale-95 disabled:opacity-50 cursor-pointer"
-          >
-            <Icon name="schedule_send" className="text-[18px]" />
-            {isSchedulingCampaign ? "Scheduling..." : `Schedule ${includedDrafts.length} email(s) over ${formatDurationHours(effectiveDurationHours)}`}
-          </button>
-        </div>
-      ) : (
       <div className="rounded-xl border border-outline bg-surface p-lg shadow-sm space-y-md">
         {renderSenderStatus()}
-
+        <p className="text-xs text-on-surface-variant">
+          Also requires <code className="font-mono text-xs bg-surface-container px-1.5 py-0.5 rounded font-bold">DATABASE_URL</code> configured server-side, plus an external cron pinging{" "}
+          <code className="font-mono text-xs bg-surface-container px-1.5 py-0.5 rounded font-bold">/api/cron/tick</code> every minute.
+        </p>
         <div className="pt-sm border-t border-outline/50">
-          <span className="text-[10px] font-bold text-on-surface-variant uppercase tracking-wider">Pacing Speed Configuration</span>
+          <span className="text-[10px] font-bold text-on-surface-variant uppercase tracking-wider">Start</span>
           <div className="mt-sm flex flex-wrap gap-xs">
-            {(Object.keys(PACING_PRESETS) as PacingKey[]).map((key) => (
+            {(["now", "at"] as const).map((mode) => (
               <button
-                key={key}
-                onClick={() => setPacing(key)}
-                disabled={isSending}
+                key={mode}
+                onClick={() => setStartMode(mode)}
+                disabled={isSchedulingCampaign}
                 className={cn(
                   "rounded-lg px-md py-sm text-xs font-bold uppercase transition-all border cursor-pointer",
-                  pacing === key
+                  startMode === mode
                     ? "bg-primary/10 border-primary text-primary"
                     : "bg-surface border-outline text-on-surface-variant hover:border-primary"
                 )}
               >
-                {PACING_PRESETS[key].label} ({PACING_PRESETS[key].minSec}-{PACING_PRESETS[key].maxSec}s)
+                {mode === "now" ? "Start now" : "Start at a specific time"}
               </button>
             ))}
           </div>
-          <p className="mt-sm text-xs text-on-surface-variant font-medium">{PACING_PRESETS[pacing].note}</p>
-        </div>
-
-        {sendPausedReason ? (
-          <div className="flex items-start gap-sm rounded-lg border border-red-500/25 bg-red-500/10 px-md py-sm text-body-sm text-red-300">
-            <Icon name="pause_circle" className="mt-0.5 text-[18px]" />
-            <div className="flex-1 space-y-sm">
-              <span>{sendPausedReason}</span>
-              <div className="flex gap-sm">
-                <button
-                  onClick={resumeSend}
-                  className="rounded-lg bg-primary px-md py-xs text-xs font-extrabold text-on-primary shadow-sm transition-opacity hover:opacity-95 cursor-pointer"
-                >
-                  Resume sending ({includedDrafts.length - sendResults.length} left)
-                </button>
-                <button
-                  onClick={dismissSendPause}
-                  className="rounded-lg border border-outline bg-surface-container-low px-md py-xs text-xs font-bold text-on-surface transition-colors hover:bg-surface-container cursor-pointer"
-                >
-                  Dismiss
-                </button>
-              </div>
-            </div>
-          </div>
-        ) : sendAutoResumeCountdown !== null && sendAutoResumeCountdown > 0 ? (
-          <div className="flex items-center gap-sm rounded-lg border border-primary/30 bg-primary/10 px-md py-sm text-body-sm text-primary font-semibold animate-pulse">
-            <Icon name="schedule" className="text-[18px]" />
-            <span>
-              Hourly send limit reached
-              {rateLimitStatus ? ` (${rateLimitStatus.hourly.cap}/${rateLimitStatus.hourly.cap})` : ""}. Auto-resuming next batch in{" "}
-              {Math.floor(sendAutoResumeCountdown / 60)}m {sendAutoResumeCountdown % 60}s... (queue remains active)
-            </span>
-          </div>
-        ) : sendBlockedReason ? (
-          <div className="flex items-start gap-sm rounded-lg border border-red-500/20 bg-red-500/10 px-md py-sm text-body-sm text-red-400">
-            <Icon name="error" className="text-[18px]" />
-            <span>{sendBlockedReason}</span>
-          </div>
-        ) : null}
-
-        {isSending && (
-          <div className="mt-lg pt-md border-t border-outline/50">
-            <div className="mb-2 flex justify-between text-xs font-mono text-primary font-bold">
-              <span>Outbox Dispatch Active...</span>
-              <span>{sendProgress.done} / {sendProgress.total}</span>
-            </div>
-            <div className="h-2 w-full bg-surface-container rounded-full overflow-hidden">
-              <motion.div
-                className="h-full bg-primary"
-                animate={{
-                  width: sendProgress.total ? `${(sendProgress.done / sendProgress.total) * 100}%` : "0%"
-                }}
-                transition={{ duration: 0.2 }}
+          {startMode === "at" && (
+            <div className="mt-sm">
+              <input
+                type="datetime-local"
+                value={startAtLocal}
+                onChange={(e) => setStartAtLocal(e.target.value)}
+                disabled={isSchedulingCampaign}
+                className="rounded-lg border border-outline bg-surface-container-low px-md py-sm text-body-sm text-on-surface font-mono"
               />
+              <p className="mt-xs text-xs text-on-surface-variant font-medium">
+                Must be in the future. This persists on the server — it&apos;ll start at this time even if you close the browser or shut down your laptop before then.
+              </p>
             </div>
-          </div>
-        )}
-
-        {!isSending && renderRateLimitNotice("now")}
-        {renderWarmupNotice()}
-
-        <div className="mt-md flex gap-md">
-          <button
-            onClick={startSend}
-            disabled={isSending || !!sendPausedReason || includedDrafts.length === 0 || draftsStale || (rateLimitStatus ? !rateLimitStatus.allowed : false) || !settingsView?.configured}
-            title={
-              draftsStale
-                ? "Regenerate drafts to include newly-approved contacts before sending"
-                : includedDrafts.length === 0
-                ? "Select at least one recipient to send to"
-                : rateLimitStatus && !rateLimitStatus.allowed
-                ? `Send rate limit reached — resumes in about ${formatRetryAfter(rateLimitStatus.retryAfterSeconds)}`
-                : undefined
-            }
-            className="flex items-center gap-sm rounded-lg bg-primary px-lg py-md text-label-md font-extrabold text-on-primary shadow-lg shadow-primary/20 transition-all hover:scale-[1.02] active:scale-95 disabled:opacity-50 cursor-pointer"
-          >
-            <Icon name="send" className="text-[18px]" />
-            {isSending ? "Sending outbox..." : `Launch Outreach Run (${includedDrafts.length})`}
-          </button>
-          {isSending && (
-            <button
-              onClick={stopSend}
-              className="rounded-lg border border-outline bg-surface-container-low px-lg py-md text-label-md font-bold text-on-surface transition-colors hover:bg-surface-container cursor-pointer shadow-sm"
-            >
-              Stop queue run
-            </button>
           )}
         </div>
-      </div>
-      )}
-
-      {/* Display Paced Send Logs */}
-      {sendResults.length > 0 && (
-        <div className="overflow-hidden rounded-xl border border-outline bg-surface shadow-sm">
-          <table className="w-full border-collapse text-left text-body-sm">
-            <thead className="bg-surface-container border-b border-outline select-none">
-              <tr>
-                <th className="px-md py-md text-[10px] font-bold uppercase tracking-wider text-on-surface-variant">Email Address</th>
-                <th className="px-md py-md text-[10px] font-bold uppercase tracking-wider text-on-surface-variant">Delivery</th>
-                <th className="px-md py-md text-[10px] font-bold uppercase tracking-wider text-on-surface-variant">Log Outcome</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-outline/40">
-              {sendResults.map((r) => (
-                <tr key={r.email} className="hover:bg-surface-container/20">
-                  <td className="px-md py-md font-mono text-[11px] text-on-surface">{r.email}</td>
-                  <td className="px-md py-md select-none">
-                    <span className={cn("rounded px-sm py-[2px] text-[10px] font-bold uppercase inline-block text-center", SEND_STATUS_STYLES[r.status])}>
-                      {r.status}
-                    </span>
-                  </td>
-                  <td className="px-md py-md text-xs text-on-surface-variant/90 leading-relaxed">{r.error || "Sent successfully (paced delay)"}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+        <div className="pt-sm border-t border-outline/50">
+          <span className="text-[10px] font-bold text-on-surface-variant uppercase tracking-wider">Spread sends over</span>
+          <div className="mt-sm flex items-center gap-sm">
+            <input
+              type="number"
+              min={minCampaignHours}
+              step="0.01"
+              value={Math.round(effectiveDurationHours * 100) / 100}
+              onChange={(e) => {
+                setDurationHours(Math.max(minCampaignHours, Number(e.target.value) || minCampaignHours));
+                setDurationTouched(true);
+              }}
+              disabled={isSchedulingCampaign}
+              className="w-28 rounded-lg border border-outline bg-surface-container-low px-md py-sm text-body-sm text-on-surface font-mono"
+            />
+            <span className="text-body-sm text-on-surface-variant">hours (minimum {formatDurationHours(minCampaignHours)} for {includedDrafts.length} email(s))</span>
+          </div>
+          <p className="mt-sm text-xs text-on-surface-variant font-medium">
+            A small batch defaults to a quick, human-paced send rather than being stretched out — the minimum above already keeps a safe gap between sends. Sends are spaced evenly across whatever window you pick; if the hourly/daily cap is hit, remaining emails wait for the next opening rather than being dropped.
+          </p>
+          {renderWarmupNotice()}
         </div>
-      )}
+        {renderRateLimitNotice()}
+        <button
+          onClick={scheduleCampaign}
+          disabled={isSchedulingCampaign || includedDrafts.length === 0 || draftsStale || startAtMissing || (campaign?.status === "running" || campaign?.status === "paused") || !settingsView?.configured}
+          className="flex items-center gap-sm rounded-lg bg-primary px-lg py-md text-label-md font-extrabold text-on-primary shadow-lg shadow-primary/20 transition-all hover:scale-[1.02] active:scale-95 disabled:opacity-50 cursor-pointer"
+        >
+          <Icon name="schedule_send" className="text-[18px]" />
+          {isSchedulingCampaign ? "Scheduling..." : `Schedule ${includedDrafts.length} email(s) over ${formatDurationHours(effectiveDurationHours)}`}
+        </button>
+      </div>
     </div>
   );
 }

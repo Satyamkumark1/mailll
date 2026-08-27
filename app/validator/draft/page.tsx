@@ -21,7 +21,7 @@ export default function DraftPage() {
   const router = useRouter();
   const { confirmAction, setGuardedAction } = useValidatorChrome();
   const {
-    results, drafts, isDrafting, draftProgress, draftError, outreachConfig, isSending,
+    results, drafts, isDrafting, draftProgress, draftError, outreachConfig,
     setOutreachConfig, setDrafting, setDraftProgress, appendDrafts, setDraftError, clearDrafts, updateDraft,
   } = useValidatorStore();
 
@@ -246,13 +246,6 @@ export default function DraftPage() {
             </div>
           </div>
 
-          {isSending && (
-            <div className="flex items-start gap-sm rounded-xl border border-amber-500/25 bg-amber-500/10 px-md py-sm text-body-sm text-amber-200">
-              <Icon name="lock" className="mt-0.5 text-[18px] text-amber-400" />
-              <span>Editing is locked while the current outreach run is sending.</span>
-            </div>
-          )}
-
           <section className="overflow-hidden rounded-2xl border border-outline bg-surface shadow-lg">
             <div className="border-b border-outline bg-surface-container-low px-md py-sm">
               <p className="text-[10px] font-bold uppercase tracking-wider text-on-surface-variant">Compose email</p>
@@ -275,7 +268,6 @@ export default function DraftPage() {
                 <input
                   id="draft-subject"
                   value={editorSubject}
-                  disabled={isSending}
                   onChange={(event) => {
                     setEditorSubject(event.target.value);
                     setEditorError(null);
@@ -293,7 +285,6 @@ export default function DraftPage() {
                 <textarea
                   id="draft-body"
                   value={editorBody}
-                  disabled={isSending}
                   onChange={(event) => {
                     setEditorBody(event.target.value);
                     setEditorError(null);
@@ -354,7 +345,7 @@ export default function DraftPage() {
                 </button>
                 <button
                   onClick={discardDraftChanges}
-                  disabled={!isDraftDirty || isSending}
+                  disabled={!isDraftDirty}
                   className="flex items-center gap-xs rounded-lg border border-outline bg-surface-container-low px-md py-sm text-label-md font-bold text-on-surface-variant transition-colors hover:text-on-surface disabled:cursor-not-allowed disabled:opacity-45 focus:outline-none focus:ring-2 focus:ring-primary/30"
                 >
                   <Icon name="undo" className="text-[16px]" />
@@ -362,7 +353,7 @@ export default function DraftPage() {
                 </button>
                 <button
                   onClick={saveDraftChanges}
-                  disabled={!isDraftDirty || isSending}
+                  disabled={!isDraftDirty}
                   className="flex items-center gap-xs rounded-lg bg-primary px-md py-sm text-label-md font-extrabold text-on-primary shadow-sm transition-transform hover:scale-[1.02] active:scale-95 disabled:cursor-not-allowed disabled:opacity-45 focus:outline-none focus:ring-2 focus:ring-primary/30"
                 >
                   <Icon name="check" className="text-[16px]" />
@@ -370,7 +361,7 @@ export default function DraftPage() {
                 </button>
                 <button
                   onClick={goToSend}
-                  disabled={isSending || draftsStale}
+                  disabled={draftsStale}
                   title={draftsStale ? "Regenerate drafts to include newly-approved contacts before sending" : "Go to the Send stage"}
                   className="flex items-center gap-xs rounded-lg border border-primary bg-primary/10 px-md py-sm text-label-md font-extrabold text-primary transition-colors hover:bg-primary/20 disabled:cursor-not-allowed disabled:opacity-45 focus:outline-none focus:ring-2 focus:ring-primary/30"
                 >
@@ -578,14 +569,13 @@ export default function DraftPage() {
                   </div>
                 </div>
               ) : (
-                <button onClick={generateDraftsHandler} disabled={!configComplete || isSending} className="flex items-center gap-sm rounded-lg bg-primary px-lg py-md text-label-md font-extrabold text-on-primary shadow-lg shadow-primary/20 transition-opacity hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-primary/30">
+                <button onClick={generateDraftsHandler} disabled={!configComplete} className="flex items-center gap-sm rounded-lg bg-primary px-lg py-md text-label-md font-extrabold text-on-primary shadow-lg shadow-primary/20 transition-opacity hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-primary/30">
                   <Icon name="auto_awesome" className="text-[18px]" />
                   {drafts.length > 0 ? "Regenerate outreach drafts" : `Generate Outreach Drafts (${validContacts.length} recipient${validContacts.length === 1 ? "" : "s"})`}
                 </button>
               )}
               {!configComplete && !isDrafting && <p className="mt-2 text-xs font-mono text-on-surface-variant">* All form details must be provided to run draft generation.</p>}
-              {isSending && <p className="mt-2 text-xs font-mono text-on-surface-variant">* Regeneration is disabled while a sending run is active.</p>}
-              {draftsStale && !isSending && <p className="mt-2 text-xs font-mono text-amber-400 font-semibold">* Contacts were approved after these drafts were generated — regenerate to include them before sending.</p>}
+              {draftsStale && <p className="mt-2 text-xs font-mono text-amber-400 font-semibold">* Contacts were approved after these drafts were generated — regenerate to include them before sending.</p>}
             </div>
           </div>
         </>

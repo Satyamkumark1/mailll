@@ -2,7 +2,7 @@
 
 Validate a contact list, draft personalized AI outreach, and send it — in one pipeline, without stitching together a separate validator, copywriting tool, and mail sender.
 
-Upload a CSV → clean it with real MX/SMTP mailbox checks (not just format regex) → generate a personalized subject + body per valid contact → send it paced, from your own SMTP account → export everything at any stage.
+Upload a CSV → clean it with real MX/SMTP mailbox checks (not just format regex) → generate a personalized subject + body per valid contact → schedule a paced background campaign from your own SMTP account → export everything at any stage.
 
 ## How it works
 
@@ -14,7 +14,7 @@ The app is a single seven-stage pipeline:
 | **2. Validate** | Every row runs through three layers: local heuristics (format, disposable-domain list, spam-trap and role-based patterns) → live MX + SMTP mailbox check with catch-all detection → a Groq AI pass that confirms or overturns the combined verdict. Can be skipped entirely if you'd rather trust your list as-is. |
 | **3. Results** | Filter by valid/invalid/flagged, search, bulk-approve flagged or invalid rows, override any single verdict, export as CSV. |
 | **4. Draft** | Groq writes a personalized subject + opening hook per valid contact from your pitch, proof points, CTA, and tone — or supply your own hook text to skip AI generation entirely and use the exact same line for everyone. Review and edit each draft in a focused per-recipient editor before sending. |
-| **5. Send** | Two modes: send now (paced, randomized delay, cancel mid-run — but stops if you close the tab), or schedule a background campaign — pick "start now" or a specific future time, and a duration to spread sends across — that keeps sending server-side even if you close the browser. Outgoing mail includes a styled HTML signature (with your logo) alongside the plain-text version. |
+| **5. Send** | Schedule a background campaign — pick "start now" or a specific future time, a duration to spread sends across, and optionally exclude specific recipients first — that keeps sending server-side even if you close the browser. Outgoing mail includes a styled HTML signature (with your logo) alongside the plain-text version. |
 | **6. Export** | Download validation results (full or valid-only) and generated drafts (CSV or a single readable text file) at any point. |
 | **7. History** | Every background campaign ever scheduled, read fresh from the server — so you can check outcomes (including failures) even if you never reopen the tab that started one. |
 
@@ -66,7 +66,7 @@ Click the gear icon (top right) to configure the sending account (SMTP host/port
 
 ## Background send campaigns (survive closing the browser)
 
-By default, "Send" is a pacing loop that runs in your browser tab — close it and the run stops. For large lists, use **Schedule background campaign** instead: choose to start now or at a specific future time, pick a total duration (e.g. "send 400 emails over 12 hours"), and the sends keep going on the server, still capped by whatever limits are set in Settings, until done — you can close the tab or shut your laptop, even before the scheduled start time arrives.
+Sending only happens through scheduled background campaigns — choose to start now or at a specific future time, pick a total duration (e.g. "send 400 emails over 12 hours"), and the sends keep going on the server, still capped by whatever limits are set in Settings, until done — you can close the tab or shut your laptop, even before the scheduled start time arrives. (An earlier "send now, keep the tab open" mode was removed — it shared the same send-rate budget as background campaigns with no way to prioritize between them, so a stray immediate send could silently starve a running campaign.)
 
 This needs two one-time setup steps, since Vercel's free (Hobby) plan can't run its own cron more than once a day:
 
