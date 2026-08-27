@@ -9,12 +9,14 @@ import {
   createBackgroundCampaign,
   getCampaignStatus,
   resumeBackgroundCampaign,
+  restartBackgroundCampaign,
   CAMPAIGN_ID_STORAGE_KEY,
   CAMPAIGN_POLL_MS,
   type CampaignView,
 } from "@/lib/campaign-client";
 import { computeMinDurationHours, formatDurationHours } from "@/lib/campaign-schedule";
 import { getSendRateStatus, sendDraftsPaced } from "@/lib/email-sender";
+import { describeRateLimitBlock, formatRetryAfter } from "@/lib/send-rate-limiter";
 import { useValidatorStore, type DraftResult, type SendStatus } from "@/lib/store";
 import { cn, computeDraftsStale } from "@/lib/utils";
 
@@ -61,8 +63,15 @@ export default function SendPage() {
   const validContacts = useMemo(() => results.filter((r) => r.status === "valid"), [results]);
   const draftsStale = useMemo(() => computeDraftsStale(validContacts, drafts), [validContacts, drafts]);
 
+  // Polled (not just fetch-once) so a page left open — e.g. watching a
+  // background campaign that's currently rate-limited — stays accurate
+  // without a manual refresh. Reuses the campaign poll cadence rather than
+  // inventing a new interval value.
   useEffect(() => {
-    getSendRateStatus().then(setRateLimitStatus).catch(() => {});
+    const load = () => getSendRateStatus().then(setRateLimitStatus).catch(() => {});
+    load();
+    const interval = setInterval(load, CAMPAIGN_POLL_MS);
+    return () => clearInterval(interval);
   }, [setRateLimitStatus]);
 
   // Rehydrate an in-progress background campaign on load/refresh — the send
@@ -123,9 +132,15 @@ export default function SendPage() {
 
     const startDescription =
       startMode === "at" && resolvedStartAt ? `starting at ${resolvedStartAt.toLocaleString()}` : "starting now";
+    const rateLimitNote =
+      rateLimitStatus && !rateLimitStatus.allowed
+        ? ` Note: you've already hit ${describeRateLimitBlock(rateLimitStatus)}, so sending won't actually start for about ${formatRetryAfter(
+            rateLimitStatus.retryAfterSeconds
+          )} — the campaign will queue and catch up automatically as capacity frees up.`
+        : "";
     const confirmed = await confirmAction(
       `This will schedule ${drafts.length} real email(s) to send from your Gmail account, ${startDescription}, spread over ${formatDurationHours(effectiveDurationHours)}, ` +
-        `continuing on the server even if you close this tab. This cannot be undone once sent. Continue?`,
+        `continuing on the server even if you close this tab. This cannot be undone once sent.${rateLimitNote} Continue?`,
       { title: "Schedule background campaign?", confirmLabel: "Schedule campaign", tone: "primary" }
     );
     if (!confirmed) return;
@@ -147,7 +162,7 @@ export default function SendPage() {
     } finally {
       setIsSchedulingCampaign(false);
     }
-  }, [drafts, outreachConfig, effectiveDurationHours, startMode, resolvedStartAt, setActiveCampaignId, refreshCampaign, confirmAction]);
+  }, [drafts, outreachConfig, effectiveDurationHours, startMode, resolvedStartAt, rateLimitStatus, setActiveCampaignId, refreshCampaign, confirmAction]);
 
   const cancelCampaign = useCallback(async () => {
     if (!activeCampaignId) return;
@@ -174,6 +189,29 @@ export default function SendPage() {
       setCampaignError(err instanceof Error ? err.message : "Failed to resume campaign");
     }
   }, [activeCampaignId, refreshCampaign]);
+
+  // Distinct from resumeCampaignHandler above: a *canceled* campaign's
+  // un-sent rows already got their status flipped to 'canceled' and their
+  // old scheduled_at times are stale, so this needs a real reschedule
+  // (server-side, see lib/campaigns.ts restartCampaign), not just flipping
+  // the campaign status back to running.
+  const restartCampaignHandler = useCallback(async () => {
+    if (!activeCampaignId || !campaign) return;
+    const remaining = campaign.emails.filter((e) => e.status === "canceled").length;
+    if (remaining === 0) return;
+    const durationHours = computeMinDurationHours(remaining, rateLimitStatus?.hourly.cap ?? 35);
+    const confirmed = await confirmAction(
+      `This will resume the ${remaining} canceled email(s), rescheduling them to send starting now, spread over ${formatDurationHours(durationHours)}. Continue?`,
+      { title: "Resume campaign?", confirmLabel: "Resume campaign", tone: "primary" }
+    );
+    if (!confirmed) return;
+    try {
+      await restartBackgroundCampaign(activeCampaignId, durationHours);
+      await refreshCampaign(activeCampaignId);
+    } catch (err) {
+      setCampaignError(err instanceof Error ? err.message : "Failed to resume campaign");
+    }
+  }, [activeCampaignId, campaign, rateLimitStatus, refreshCampaign, confirmAction]);
 
   const dismissCampaign = useCallback(() => {
     window.localStorage.removeItem(CAMPAIGN_ID_STORAGE_KEY);
@@ -320,6 +358,68 @@ export default function SendPage() {
     );
   };
 
+  // "now" reads as urgent (sending is blocked right now, with an escape
+  // hatch to background scheduling instead); "schedule" reads as a reassuring
+  // heads-up, since a background campaign is designed to queue and wait —
+  // cap exhaustion there is expected, not an error.
+  const renderRateLimitNotice = (variant: "now" | "schedule") => {
+    if (!rateLimitStatus) return null;
+    if (rateLimitStatus.allowed) {
+      return (
+        <p className="text-xs font-mono text-on-surface-variant font-medium">
+          {rateLimitStatus.hourly.remaining} sends left this hour · {rateLimitStatus.daily.remaining} left today
+        </p>
+      );
+    }
+
+    const capDescription = describeRateLimitBlock(rateLimitStatus);
+    const retryPhrase = formatRetryAfter(rateLimitStatus.retryAfterSeconds);
+
+    if (variant === "now") {
+      return (
+        <div className="flex items-center justify-between gap-sm rounded-lg border border-amber-500/25 bg-amber-500/10 px-md py-sm text-body-sm text-amber-200">
+          <span className="flex items-start gap-sm">
+            <Icon name="hourglass_top" className="mt-0.5 text-[18px]" />
+            <span>Send limit reached — you&apos;ve hit {capDescription}. Sending will resume automatically in about {retryPhrase}.</span>
+          </span>
+          <button
+            onClick={() => setSendMode("schedule")}
+            className="shrink-0 rounded-lg border border-amber-500/40 bg-amber-500/10 px-sm py-xs text-xs font-bold text-amber-200 hover:bg-amber-500/20 cursor-pointer"
+          >
+            Schedule instead
+          </button>
+        </div>
+      );
+    }
+
+    return (
+      <div className="flex items-start gap-sm rounded-lg border border-amber-500/20 bg-amber-500/5 px-md py-sm text-body-sm text-amber-200/90">
+        <Icon name="info" className="mt-0.5 text-[18px]" />
+        <span>
+          Heads up: you&apos;ve already hit {capDescription}. That&apos;s fine for a background campaign — it&apos;s built to
+          queue and wait — but nothing will send for about {retryPhrase}, until the next slot frees up.
+        </span>
+      </div>
+    );
+  };
+
+  const renderCampaignStallNotice = () => {
+    if (!campaign || campaign.status !== "running") return null;
+    if (!rateLimitStatus || rateLimitStatus.allowed) return null;
+    if (!campaign.emails.some((e) => e.status === "pending")) return null;
+    const capDescription = describeRateLimitBlock(rateLimitStatus);
+    const retryPhrase = formatRetryAfter(rateLimitStatus.retryAfterSeconds);
+    return (
+      <div className="flex items-start gap-sm rounded-lg border border-amber-500/20 bg-amber-500/5 px-md py-sm text-body-sm text-amber-200/90">
+        <Icon name="pause_circle" className="mt-0.5 text-[18px]" />
+        <span>
+          Sends are currently paused — you&apos;ve hit {capDescription}. This is expected; the campaign will resume
+          automatically in about {retryPhrase}. No action needed.
+        </span>
+      </div>
+    );
+  };
+
   return (
     <div className="space-y-lg">
       <div className="space-y-xs">
@@ -366,6 +466,7 @@ export default function SendPage() {
             {" → "}
             {new Date(campaign.windowEnd).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}
           </p>
+          {renderCampaignStallNotice()}
           <div>
             <div className="mb-2 flex justify-between text-xs font-mono text-primary font-bold">
               <span>{campaign.sentCount + campaign.failedCount} / {campaign.totalCount} processed</span>
@@ -381,7 +482,9 @@ export default function SendPage() {
               />
             </div>
           </div>
-          {(campaign.status === "running" || campaign.status === "paused") && (
+          {(campaign.status === "running" ||
+            campaign.status === "paused" ||
+            (campaign.status === "canceled" && campaign.emails.some((e) => e.status === "canceled"))) && (
             <div className="flex gap-sm">
               {campaign.status === "paused" && (
                 <button
@@ -391,12 +494,22 @@ export default function SendPage() {
                   Resume campaign
                 </button>
               )}
-              <button
-                onClick={cancelCampaign}
-                className="rounded-lg border border-outline bg-surface-container-low px-md py-sm text-label-md font-bold text-on-surface transition-colors hover:bg-surface-container cursor-pointer"
-              >
-                Cancel campaign
-              </button>
+              {campaign.status === "canceled" && (
+                <button
+                  onClick={restartCampaignHandler}
+                  className="rounded-lg bg-primary px-md py-sm text-label-md font-extrabold text-on-primary shadow-sm transition-opacity hover:opacity-95 cursor-pointer"
+                >
+                  Resume campaign
+                </button>
+              )}
+              {(campaign.status === "running" || campaign.status === "paused") && (
+                <button
+                  onClick={cancelCampaign}
+                  className="rounded-lg border border-outline bg-surface-container-low px-md py-sm text-label-md font-bold text-on-surface transition-colors hover:bg-surface-container cursor-pointer"
+                >
+                  Cancel campaign
+                </button>
+              )}
             </div>
           )}
           {campaign.emails.length > 0 && (
@@ -427,6 +540,8 @@ export default function SendPage() {
                           ? e.error
                           : e.sentAt
                           ? `Sent ${new Date(e.sentAt).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}`
+                          : e.status === "pending" && rateLimitStatus && !rateLimitStatus.allowed
+                          ? `Waiting — send cap reached, resumes in about ${formatRetryAfter(rateLimitStatus.retryAfterSeconds)}`
                           : "Waiting for its scheduled slot"}
                       </td>
                     </tr>
@@ -526,6 +641,7 @@ export default function SendPage() {
             </p>
             {renderWarmupNotice()}
           </div>
+          {renderRateLimitNotice("schedule")}
           <button
             onClick={scheduleCampaign}
             disabled={isSchedulingCampaign || drafts.length === 0 || draftsStale || startAtMissing || (campaign?.status === "running" || campaign?.status === "paused") || !settingsView?.configured}
@@ -616,11 +732,7 @@ export default function SendPage() {
           </div>
         )}
 
-        {rateLimitStatus && (
-          <p className="text-xs font-mono text-on-surface-variant font-medium">
-            {rateLimitStatus.hourly.remaining} sends left this hour · {rateLimitStatus.daily.remaining} left today
-          </p>
-        )}
+        {!isSending && renderRateLimitNotice("now")}
         {renderWarmupNotice()}
 
         <div className="mt-md flex gap-md">
@@ -631,7 +743,7 @@ export default function SendPage() {
               draftsStale
                 ? "Regenerate drafts to include newly-approved contacts before sending"
                 : rateLimitStatus && !rateLimitStatus.allowed
-                ? "Send rate limit reached"
+                ? `Send rate limit reached — resumes in about ${formatRetryAfter(rateLimitStatus.retryAfterSeconds)}`
                 : undefined
             }
             className="flex items-center gap-sm rounded-lg bg-primary px-lg py-md text-label-md font-extrabold text-on-primary shadow-lg shadow-primary/20 transition-all hover:scale-[1.02] active:scale-95 disabled:opacity-50 cursor-pointer"

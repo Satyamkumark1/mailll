@@ -77,6 +77,34 @@ export function computeRateLimitStatus(
   };
 }
 
+// Human-readable description of whichever cap(s) are currently blocking a
+// send — used to explain a stalled campaign/send in the UI rather than
+// leaving the user to guess why nothing is happening.
+export function describeRateLimitBlock(status: RateLimitStatus): string {
+  const hourlyBlocked = status.hourly.remaining === 0;
+  const dailyBlocked = status.daily.remaining === 0;
+  if (hourlyBlocked && dailyBlocked) {
+    return `the hourly cap (${status.hourly.used}/${status.hourly.cap} this hour) and the daily cap (${status.daily.used}/${status.daily.cap} in the last 24h)`;
+  }
+  if (dailyBlocked) {
+    return `the daily cap (${status.daily.used}/${status.daily.cap} sends in the last 24h)`;
+  }
+  return `the hourly cap (${status.hourly.used}/${status.hourly.cap} sends this hour)`;
+}
+
+// Pure — deliberately a relative duration ("in about 45 min"), not an
+// absolute clock time, so it can be computed directly during render without
+// calling Date.now() (React's react-hooks/purity rule forbids impure calls
+// like Date.now() in render, including inside useMemo/useEffect derivations).
+export function formatRetryAfter(seconds: number): string {
+  if (seconds < 60) return "less than a minute";
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  return remainingMinutes > 0 ? `${hours}h ${remainingMinutes}m` : `${hours}h`;
+}
+
 // Sourced from the Settings-UI-configured caps (lib/sender-settings.ts),
 // with the warm-up ramp already applied — everything downstream (the rate
 // limiter, campaign duration validation) automatically respects it with no

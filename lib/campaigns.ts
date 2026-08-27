@@ -148,6 +148,44 @@ export async function resumeCampaign(id: string): Promise<void> {
   `;
 }
 
+// Distinct from resumeCampaign above: cancelCampaign() already flipped this
+// campaign's un-sent rows to 'canceled' with stale (likely past) scheduled_at
+// times, so bringing it back needs a real reschedule — not just flipping the
+// campaign status bit — or the cron would immediately try to "catch up" on
+// every one of them at once instead of pacing them again.
+export async function restartCampaign(id: string, durationHours: number): Promise<void> {
+  const [campaign] = await sql`SELECT status FROM campaigns WHERE id = ${id}`;
+  if (!campaign || campaign.status !== "canceled") {
+    throw new Error("Only a canceled campaign can be restarted");
+  }
+
+  const canceledEmails = await sql`
+    SELECT id FROM campaign_emails WHERE campaign_id = ${id} AND status = 'canceled'
+  `;
+  if (canceledEmails.length === 0) {
+    throw new Error("No canceled emails left to restart");
+  }
+
+  const now = new Date();
+  const windowEnd = new Date(now.getTime() + durationHours * 3600_000);
+  const scheduledTimes = computeScheduledTimes(canceledEmails.length, now, windowEnd);
+  const ids = canceledEmails.map((e) => e.id as string);
+  const scheduledAt = scheduledTimes.map((t) => t.toISOString());
+
+  await sql`
+    UPDATE campaign_emails AS ce
+    SET status = 'pending', scheduled_at = data.scheduled_at
+    FROM (SELECT * FROM unnest(${ids}::uuid[], ${scheduledAt}::timestamptz[]) AS t(id, scheduled_at)) AS data
+    WHERE ce.id = data.id
+  `;
+
+  await sql`
+    UPDATE campaigns
+    SET status = 'running', window_start = ${now.toISOString()}, window_end = ${windowEnd.toISOString()}, consecutive_failures = 0
+    WHERE id = ${id}
+  `;
+}
+
 export interface DueEmail {
   id: string;
   campaignId: string;

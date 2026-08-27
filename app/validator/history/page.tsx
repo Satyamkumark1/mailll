@@ -7,10 +7,14 @@ import { useValidatorChrome } from "../layout";
 import {
   cancelBackgroundCampaign,
   listCampaigns,
+  restartBackgroundCampaign,
   CAMPAIGN_ID_STORAGE_KEY,
   CAMPAIGN_POLL_MS,
   type CampaignListView,
 } from "@/lib/campaign-client";
+import { computeMinDurationHours, formatDurationHours } from "@/lib/campaign-schedule";
+import { getSendRateStatus } from "@/lib/email-sender";
+import { describeRateLimitBlock, formatRetryAfter } from "@/lib/send-rate-limiter";
 import { useValidatorStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
 
@@ -24,7 +28,7 @@ const CAMPAIGN_STATUS_STYLES: Record<CampaignListView["status"], string> = {
 export default function HistoryPage() {
   const router = useRouter();
   const { confirmAction } = useValidatorChrome();
-  const { setActiveCampaignId } = useValidatorStore();
+  const { setActiveCampaignId, rateLimitStatus, setRateLimitStatus } = useValidatorStore();
 
   const [campaignHistory, setCampaignHistory] = useState<CampaignListView[] | null>(null);
   const [historyError, setHistoryError] = useState<string | null>(null);
@@ -34,14 +38,16 @@ export default function HistoryPage() {
   // localStorage, so it's the one place you can always find a campaign's
   // outcome even if you never reopened the tab that scheduled it.
   useEffect(() => {
-    const load = () =>
+    const load = () => {
       listCampaigns()
         .then(setCampaignHistory)
         .catch((err) => setHistoryError(err instanceof Error ? err.message : "Failed to load campaign history"));
+      getSendRateStatus().then(setRateLimitStatus).catch(() => {});
+    };
     load();
     const interval = setInterval(load, CAMPAIGN_POLL_MS);
     return () => clearInterval(interval);
-  }, []);
+  }, [setRateLimitStatus]);
 
   const trackCampaign = useCallback(
     (id: string) => {
@@ -68,6 +74,30 @@ export default function HistoryPage() {
       }
     },
     [confirmAction]
+  );
+
+  // For a canceled campaign, totalCount - sentCount - failedCount is exactly
+  // the count of rows still sitting at status 'canceled' (cancelCampaign()
+  // flips every non-terminal row to 'canceled'), so no extra field is needed
+  // on CampaignListView to know whether there's anything left to restart.
+  const restartCampaignFromHistory = useCallback(
+    async (c: CampaignListView) => {
+      const remaining = c.totalCount - c.sentCount - c.failedCount;
+      if (remaining <= 0) return;
+      const durationHours = computeMinDurationHours(remaining, rateLimitStatus?.hourly.cap ?? 35);
+      const confirmed = await confirmAction(
+        `This will resume the ${remaining} canceled email(s), rescheduling them to send starting now, spread over ${formatDurationHours(durationHours)}. Continue?`,
+        { title: "Resume campaign?", confirmLabel: "Resume campaign", tone: "primary" }
+      );
+      if (!confirmed) return;
+      try {
+        await restartBackgroundCampaign(c.id, durationHours);
+        setCampaignHistory(await listCampaigns());
+      } catch (err) {
+        setHistoryError(err instanceof Error ? err.message : "Failed to resume campaign");
+      }
+    },
+    [confirmAction, rateLimitStatus]
   );
 
   return (
@@ -124,6 +154,17 @@ export default function HistoryPage() {
                   <td className="px-md py-md text-xs text-on-surface font-mono">
                     {c.sentCount + c.failedCount} / {c.totalCount} processed
                     {c.failedCount > 0 && <span className="ml-sm text-red-400 font-bold">{c.failedCount} failed</span>}
+                    {c.status === "running" &&
+                      c.totalCount - c.sentCount - c.failedCount > 0 &&
+                      rateLimitStatus &&
+                      !rateLimitStatus.allowed && (
+                        <span
+                          className="ml-sm text-amber-400 font-semibold"
+                          title={`Paused — you've hit ${describeRateLimitBlock(rateLimitStatus)}. Resumes in about ${formatRetryAfter(rateLimitStatus.retryAfterSeconds)}.`}
+                        >
+                          (paused — cap reached, resumes in ~{formatRetryAfter(rateLimitStatus.retryAfterSeconds)})
+                        </span>
+                      )}
                   </td>
                   <td className="px-md py-md">
                     <div className="flex gap-sm">
@@ -139,6 +180,14 @@ export default function HistoryPage() {
                           className="rounded-lg border border-red-500/25 bg-red-500/10 px-sm py-xs text-xs font-bold text-red-300 transition-colors hover:bg-red-500/20 cursor-pointer"
                         >
                           Cancel
+                        </button>
+                      )}
+                      {c.status === "canceled" && c.totalCount - c.sentCount - c.failedCount > 0 && (
+                        <button
+                          onClick={() => restartCampaignFromHistory(c)}
+                          className="rounded-lg border border-primary/40 bg-primary/10 px-sm py-xs text-xs font-bold text-primary transition-colors hover:bg-primary/20 cursor-pointer"
+                        >
+                          Resume
                         </button>
                       )}
                     </div>

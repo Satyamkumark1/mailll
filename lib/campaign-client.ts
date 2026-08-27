@@ -79,3 +79,18 @@ export async function resumeBackgroundCampaign(id: string): Promise<void> {
     throw new Error(`Failed to resume campaign (HTTP ${res.status})`);
   }
 }
+
+// For a *canceled* campaign — reschedules its un-sent emails over a fresh
+// window starting now, rather than just flipping the status bit back (see
+// resumeBackgroundCampaign above, which is for the auto-paused case instead).
+export async function restartBackgroundCampaign(id: string, durationHours: number): Promise<void> {
+  const res = await fetch(`/api/campaigns/${id}/restart`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ durationHours }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `Failed to restart campaign (HTTP ${res.status})`);
+  }
+}
