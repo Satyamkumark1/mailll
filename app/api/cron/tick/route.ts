@@ -34,7 +34,7 @@ async function tick() {
   let deferred = 0;
 
   for (const email of due) {
-    const rateLimit = await reserveSendSlot();
+    const rateLimit = await reserveSendSlot("campaign");
     if (!rateLimit.allowed) {
       await releaseEmail(email.id);
       deferred++;

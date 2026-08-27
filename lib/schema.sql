@@ -38,9 +38,11 @@ CREATE INDEX IF NOT EXISTS campaign_emails_due_idx ON campaign_emails (status, s
 CREATE INDEX IF NOT EXISTS campaign_emails_campaign_idx ON campaign_emails (campaign_id);
 
 CREATE TABLE IF NOT EXISTS send_attempts (
-  sent_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  sent_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  source TEXT NOT NULL DEFAULT 'immediate' -- immediate | campaign
 );
 CREATE INDEX IF NOT EXISTS send_attempts_sent_at_idx ON send_attempts (sent_at);
+ALTER TABLE send_attempts ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'immediate';
 
 -- Singleton row (id is always 1) holding the self-service sender account +
 -- send caps configured via the Settings modal, replacing the old

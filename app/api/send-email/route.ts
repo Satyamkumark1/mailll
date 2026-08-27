@@ -19,7 +19,7 @@ export async function POST(request: Request) {
     return Response.json({ error: "No sender account configured yet — set one up in Settings." }, { status: 500 });
   }
 
-  const rateLimit = await reserveSendSlot();
+  const rateLimit = await reserveSendSlot("immediate");
   if (!rateLimit.allowed) {
     let errorMsg = `Send rate limit exceeded. Retry after ${rateLimit.retryAfterSeconds} seconds.`;
     if (rateLimit.hourly.used >= rateLimit.hourly.cap) {
