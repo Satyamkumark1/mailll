@@ -44,7 +44,7 @@ function getDisplayStatus(e: CampaignView["emails"][number]): { label: string; c
 function sentDetailSuffix(e: CampaignView["emails"][number]): string {
   if (e.deliveryStatus === "bounced") return ` — Bounced${e.bounceReason ? `: ${e.bounceReason}` : ""}`;
   if (e.deliveryStatus === "delivered") return " — Delivered";
-  return " — Confirming delivery…";
+  return "";
 }
 
 export default function SendPage() {

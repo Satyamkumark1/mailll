@@ -3,10 +3,9 @@ import { simpleParser } from "mailparser";
 import { sql } from "./db.ts";
 import { getDecryptedSmtpPassword, getSenderSettings, type SenderSettings } from "./sender-settings.ts";
 
-// Don't hit IMAP more than once per this interval — bounces don't arrive
-// fast enough to justify checking on every ~1 minute cron tick, and Zoho
-// (like most providers) rate-limits repeated IMAP logins.
-const CHECK_INTERVAL_MS = 5 * 60_000;
+// Check IMAP every 1 minute when sent emails are pending delivery confirmation
+// so bounce-back DSN notifications are detected promptly during active sends.
+const CHECK_INTERVAL_MS = 1 * 60_000;
 // How long to wait with no bounce before inferring a 'sent' email was
 // actually delivered. SMTP has no positive delivery acknowledgement — this
 // is a heuristic, not a real confirmation, but bounces overwhelmingly arrive
@@ -92,25 +91,13 @@ async function pollInbox(settings: SenderSettings, lastCheckedAt: string | null,
       if (!mailbox) return;
       const uidValidity = Number(mailbox.uidValidity);
 
-      // First time this has ever run (or a brand new mailbox generation, see
-      // below): establish a baseline instead of scanning the whole inbox
-      // history — only mail arriving from this point on gets checked.
-      if (!lastCheckedAt) {
-        await sql`
-          UPDATE sender_settings
-          SET bounce_last_uid = ${mailbox.uidNext - 1}, bounce_uidvalidity = ${uidValidity}, last_bounce_check_at = now()
-          WHERE id = 1
-        `;
-        return;
-      }
-
       let lastUid = Number(lastUidRaw ?? 0);
       const knownUidValidity = Number(uidValidityRaw ?? 0);
-      // UIDVALIDITY changing means the server renumbered the mailbox — the
-      // UID we remembered no longer identifies the same message. Resync to
-      // "from now on" rather than reprocessing under the new numbering.
-      if (knownUidValidity !== uidValidity) {
-        lastUid = mailbox.uidNext - 1;
+
+      // On initial setup or UIDVALIDITY reset, start checking from recent messages
+      // (last 20) instead of skipping existing messages entirely.
+      if (!lastCheckedAt || knownUidValidity !== uidValidity) {
+        lastUid = Math.max(0, mailbox.uidNext - 20);
       }
 
       let maxSeenUid = lastUid;
