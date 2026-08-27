@@ -12,6 +12,7 @@ export interface CampaignEmailView {
   status: CampaignEmailStatus;
   error: string | null;
   sentAt: string | null;
+  scheduledAt: string;
 }
 
 export interface CampaignListView {

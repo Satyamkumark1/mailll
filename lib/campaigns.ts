@@ -11,6 +11,7 @@ export interface CampaignEmailSummary {
   status: CampaignEmailStatus;
   error: string | null;
   sentAt: string | null;
+  scheduledAt: string;
 }
 
 export interface CampaignListItem {
@@ -100,7 +101,7 @@ export async function getCampaign(id: string): Promise<CampaignSummary | null> {
   if (!campaign) return null;
 
   const emails = await sql`
-    SELECT to_email, status, error, sent_at
+    SELECT to_email, status, error, sent_at, scheduled_at
     FROM campaign_emails
     WHERE campaign_id = ${id}
     ORDER BY scheduled_at ASC
@@ -121,6 +122,7 @@ export async function getCampaign(id: string): Promise<CampaignSummary | null> {
       status: e.status as CampaignEmailStatus,
       error: (e.error as string | null) ?? null,
       sentAt: (e.sent_at as string | null) ?? null,
+      scheduledAt: e.scheduled_at as string,
     })),
   };
 }

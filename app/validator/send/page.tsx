@@ -361,6 +361,11 @@ export default function SendPage() {
               ? "The engine stopped itself after 2 consecutive failed sends — check the log below for why, fix the issue, then resume."
               : `Finished ${new Date(campaign.windowEnd).toLocaleString()}.`}
           </p>
+          <p className="text-xs font-mono text-on-surface-variant/80">
+            Scheduled window: {new Date(campaign.windowStart).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}
+            {" → "}
+            {new Date(campaign.windowEnd).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}
+          </p>
           <div>
             <div className="mb-2 flex justify-between text-xs font-mono text-primary font-bold">
               <span>{campaign.sentCount + campaign.failedCount} / {campaign.totalCount} processed</span>
@@ -401,6 +406,7 @@ export default function SendPage() {
                   <tr>
                     <th className="px-md py-sm text-[10px] font-bold uppercase tracking-wider text-on-surface-variant">Email Address</th>
                     <th className="px-md py-sm text-[10px] font-bold uppercase tracking-wider text-on-surface-variant">Status</th>
+                    <th className="px-md py-sm text-[10px] font-bold uppercase tracking-wider text-on-surface-variant">Scheduled</th>
                     <th className="px-md py-sm text-[10px] font-bold uppercase tracking-wider text-on-surface-variant">Detail</th>
                   </tr>
                 </thead>
@@ -413,8 +419,15 @@ export default function SendPage() {
                           {e.status}
                         </span>
                       </td>
+                      <td className="px-md py-sm font-mono text-[11px] text-on-surface-variant">
+                        {new Date(e.scheduledAt).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}
+                      </td>
                       <td className="px-md py-sm text-xs text-on-surface-variant/90 leading-relaxed">
-                        {e.error || (e.sentAt ? `Sent ${new Date(e.sentAt).toLocaleTimeString()}` : "Waiting for its scheduled slot")}
+                        {e.error
+                          ? e.error
+                          : e.sentAt
+                          ? `Sent ${new Date(e.sentAt).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}`
+                          : "Waiting for its scheduled slot"}
                       </td>
                     </tr>
                   ))}
