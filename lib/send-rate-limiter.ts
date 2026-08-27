@@ -187,8 +187,10 @@ export async function reserveSendSlot(source: "immediate" | "campaign", now = Da
   if (status.allowed) {
     await sql`INSERT INTO send_attempts (sent_at, source) VALUES (to_timestamp(${now / 1000}), ${source})`;
     const updatedAttempts = [...attempts, { ts: now, source }];
+    const postStatus = computeRateLimitStatus(updatedAttempts.map((a) => a.ts), config, now);
     return {
-      ...computeRateLimitStatus(updatedAttempts.map((a) => a.ts), config, now),
+      ...postStatus,
+      allowed: true, // This specific reservation was permitted and granted.
       hourlySourceBreakdown: computeHourlySourceBreakdown(updatedAttempts, now),
     };
   }
