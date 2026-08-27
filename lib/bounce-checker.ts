@@ -154,8 +154,9 @@ export async function checkBounces(): Promise<void> {
     if ((pendingConfirmation as number) === 0 && lastCheckedAt) return;
 
     await pollInbox(settings, lastCheckedAt, state?.bounce_last_uid, state?.bounce_uidvalidity);
-  } catch {
+  } catch (err) {
     // Best-effort — IMAP misconfiguration must never take down the send cron.
+    console.error("IMAP bounce check failed:", err instanceof Error ? err.message : err);
   } finally {
     await markInferredDelivered().catch(() => {});
   }
