@@ -132,7 +132,8 @@ export default function HistoryPage() {
         </div>
       ) : (
         <div className="overflow-hidden rounded-xl border border-outline bg-surface shadow-sm">
-          <table className="w-full border-collapse text-left text-body-sm">
+          <div className="overflow-auto">
+          <table className="w-full min-w-[640px] border-collapse text-left text-body-sm">
             <thead className="bg-surface-container border-b border-outline select-none">
               <tr>
                 <th className="px-md py-md text-[10px] font-bold uppercase tracking-wider text-on-surface-variant">Created</th>
@@ -197,6 +198,7 @@ export default function HistoryPage() {
               ))}
             </tbody>
           </table>
+          </div>
         </div>
       )}
     </div>

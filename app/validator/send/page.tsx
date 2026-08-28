@@ -278,9 +278,9 @@ export default function SendPage() {
       );
     }
     return (
-      <p className="flex items-center gap-sm text-body-sm text-on-surface-variant font-semibold">
+      <p className="flex flex-wrap items-center gap-x-sm gap-y-1 text-body-sm text-on-surface-variant font-semibold">
         <Icon name="lock" className="text-[20px] text-primary" />
-        Sending as <code className="font-mono text-xs bg-surface-container px-1.5 py-0.5 rounded font-bold">{settingsView.smtpUser}</code>.{" "}
+        Sending as <code className="font-mono text-xs bg-surface-container px-1.5 py-0.5 rounded font-bold break-all">{settingsView.smtpUser}</code>.{" "}
         <button onClick={openSettings} className="text-primary font-bold hover:underline cursor-pointer">
           Edit
         </button>
@@ -467,8 +467,8 @@ export default function SendPage() {
                   </button>
                 </div>
               )}
-              <div className="max-h-72 overflow-y-auto rounded-lg border border-outline/50">
-                <table className="w-full border-collapse text-left text-body-sm">
+              <div className="max-h-72 overflow-auto rounded-lg border border-outline/50">
+                <table className="w-full min-w-[640px] border-collapse text-left text-body-sm">
                   <thead className="sticky top-0 bg-surface-container border-b border-outline select-none">
                     <tr>
                       <th className="w-10 px-md py-sm"></th>
@@ -575,8 +575,8 @@ export default function SendPage() {
               </button>
             </div>
           </div>
-          <div className="max-h-72 overflow-y-auto rounded-lg border border-outline/50">
-            <table className="w-full border-collapse text-left text-body-sm">
+          <div className="max-h-72 overflow-auto rounded-lg border border-outline/50">
+            <table className="w-full min-w-[480px] border-collapse text-left text-body-sm">
               <thead className="sticky top-0 bg-surface-container border-b border-outline select-none">
                 <tr>
                   <th className="w-10 px-md py-sm"></th>
