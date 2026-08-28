@@ -80,3 +80,14 @@ CREATE TABLE IF NOT EXISTS sender_settings (
 ALTER TABLE sender_settings ADD COLUMN IF NOT EXISTS last_bounce_check_at TIMESTAMPTZ;
 ALTER TABLE sender_settings ADD COLUMN IF NOT EXISTS bounce_last_uid BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE sender_settings ADD COLUMN IF NOT EXISTS bounce_uidvalidity BIGINT NOT NULL DEFAULT 0;
+
+-- App Users table storing authorized user credentials
+CREATE TABLE IF NOT EXISTS users (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  email TEXT UNIQUE NOT NULL,
+  password_hash TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS users_email_idx ON users (email);
+

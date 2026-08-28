@@ -628,6 +628,9 @@ export default function SendPage() {
           Also requires <code className="font-mono text-xs bg-surface-container px-1.5 py-0.5 rounded font-bold">DATABASE_URL</code> configured server-side, plus an external cron pinging{" "}
           <code className="font-mono text-xs bg-surface-container px-1.5 py-0.5 rounded font-bold">/api/cron/tick</code> every minute.
         </p>
+        <p className="text-xs text-on-surface-variant">
+          Delivered/Bounced status is inferred by checking your sending mailbox over IMAP for bounce-back notifications — it needs IMAP access enabled on the same account, and &quot;Delivered&quot; means no bounce arrived after 24 hours, not a guaranteed inbox placement.
+        </p>
         <div className="pt-sm border-t border-outline/50">
           <span className="text-[10px] font-bold text-on-surface-variant uppercase tracking-wider">Start</span>
           <div className="mt-sm flex flex-wrap gap-xs">

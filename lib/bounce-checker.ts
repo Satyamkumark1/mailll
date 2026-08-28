@@ -6,11 +6,10 @@ import { getDecryptedSmtpPassword, getSenderSettings, type SenderSettings } from
 // Check IMAP every 1 minute when sent emails are pending delivery confirmation
 // so bounce-back DSN notifications are detected promptly during active sends.
 const CHECK_INTERVAL_MS = 1 * 60_000;
-// How long to wait with no bounce before inferring a 'sent' email was
-// actually delivered. SMTP has no positive delivery acknowledgement — this
-// is a heuristic, not a real confirmation, but bounces overwhelmingly arrive
-// within minutes to a few hours, so 24h with silence is a safe read.
-const DELIVERED_AFTER_MS = 24 * 3600_000;
+// markInferredDelivered() below waits 24 hours of silence before assuming a
+// 'sent' email was actually delivered — SMTP has no positive delivery
+// acknowledgement, so this is a heuristic, not a real confirmation, but
+// bounces overwhelmingly arrive within minutes to a few hours.
 
 const BOUNCE_SUBJECT_RE =
   /undeliver|delivery status notification|delivery has failed|mail delivery failed|returned mail|failure notice|delivery incomplete|delivery failure/i;
