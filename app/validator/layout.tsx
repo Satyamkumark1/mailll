@@ -213,6 +213,26 @@ export default function ValidatorLayout({ children }: { children: React.ReactNod
     }
   }, [refreshSettingsView, confirmAction]);
 
+  const [user, setUser] = useState<{ email: string } | null>(null);
+
+  useEffect(() => {
+    fetch("/api/auth/me")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data?.user) setUser(data.user);
+      })
+      .catch(() => {});
+  }, []);
+
+  const handleLogout = useCallback(async () => {
+    try {
+      await fetch("/api/auth/logout", { method: "POST" });
+    } finally {
+      router.push("/login");
+      router.refresh();
+    }
+  }, [router]);
+
   const groqConnected = Boolean(process.env.NEXT_PUBLIC_GROQ_API_KEY);
 
   const handleStartOver = () => {
@@ -228,6 +248,8 @@ export default function ValidatorLayout({ children }: { children: React.ReactNod
     () => ({ confirmAction, settingsView, refreshSettingsView, openSettings, setGuardedAction }),
     [confirmAction, settingsView, refreshSettingsView, openSettings]
   );
+
+  const userInitial = user?.email ? user.email.charAt(0).toUpperCase() : "U";
 
   return (
     <ValidatorChromeContext.Provider value={chrome}>
@@ -269,9 +291,21 @@ export default function ValidatorLayout({ children }: { children: React.ReactNod
                 <Icon name="settings" className="text-[18px]" />
               </button>
 
-              <div className="flex h-8 w-8 items-center justify-center rounded-full bg-primary text-on-primary font-extrabold text-xs shadow-md select-none">
-                JD
+              <div
+                title={user?.email ? `Logged in as ${user.email}` : "Authorized User"}
+                className="flex h-8 w-8 items-center justify-center rounded-full bg-primary text-on-primary font-extrabold text-xs shadow-md select-none"
+              >
+                {userInitial}
               </div>
+
+              <button
+                onClick={handleLogout}
+                title={`Sign out (${user?.email || "User"})`}
+                className="flex items-center gap-xs rounded-lg border border-outline bg-surface-container-low px-sm py-1 text-label-md font-medium text-on-surface-variant transition-all hover:bg-red-500/10 hover:text-red-400 hover:border-red-500/30 active:scale-95 cursor-pointer shadow-sm"
+              >
+                <Icon name="logout" className="text-[16px]" />
+                <span className="hidden md:inline">Sign Out</span>
+              </button>
             </div>
           </header>
 
