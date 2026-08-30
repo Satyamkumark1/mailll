@@ -29,21 +29,38 @@ const CAMPAIGN_EMAIL_STATUS_STYLES: Record<CampaignView["emails"][number]["statu
   skipped: "bg-on-surface-variant/10 text-on-surface-variant border border-outline",
 };
 const BOUNCED_STATUS_STYLE = "bg-red-500/10 text-red-400 border border-red-500/20";
+const UNSUBSCRIBED_STATUS_STYLE = "bg-amber-500/10 text-amber-400 border border-amber-500/20";
 
-// "sent" only ever meant the SMTP server accepted the message — a bounce
-// discovered later (lib/bounce-checker.ts) is a more useful thing to show
-// front-and-center than leaving the badge reading "sent" forever.
+// "sent" only ever meant the SMTP server accepted the message — a bounce or
+// unsubscribe discovered later (lib/bounce-checker.ts / app/api/t/u) is a
+// more useful thing to show front-and-center than leaving the badge reading
+// "sent" forever. Unsubscribed takes priority over bounced when somehow both
+// are set, since it's the more actionable of the two.
 function getDisplayStatus(e: CampaignView["emails"][number]): { label: string; className: string } {
+  if (e.unsubscribedAt) {
+    return { label: "unsubscribed", className: UNSUBSCRIBED_STATUS_STYLE };
+  }
   if (e.status === "sent" && e.deliveryStatus === "bounced") {
-    return { label: "bounced", className: BOUNCED_STATUS_STYLE };
+    return { label: `bounced${e.bounceType ? ` (${e.bounceType})` : ""}`, className: BOUNCED_STATUS_STYLE };
   }
   return { label: e.status, className: CAMPAIGN_EMAIL_STATUS_STYLES[e.status] };
 }
 
 function sentDetailSuffix(e: CampaignView["emails"][number]): string {
-  if (e.deliveryStatus === "bounced") return ` — Bounced${e.bounceReason ? `: ${e.bounceReason}` : ""}`;
+  if (e.deliveryStatus === "bounced") {
+    return ` — Bounced${e.bounceType ? ` (${e.bounceType})` : ""}${e.bounceReason ? `: ${e.bounceReason}` : ""}`;
+  }
   if (e.deliveryStatus === "delivered") return " — Delivered";
   return "";
+}
+
+// Only whether the recipient has engaged at all, not exact counts — the DB
+// still has open_count/click_count if that's ever needed.
+function engagementLabel(e: CampaignView["emails"][number]): string {
+  const parts: string[] = [];
+  if (e.openedAt) parts.push("Opened");
+  if (e.clickedAt) parts.push("Clicked");
+  return parts.length ? parts.join(" · ") : "—";
 }
 
 export default function SendPage() {
@@ -56,6 +73,7 @@ export default function SendPage() {
   const [durationTouched, setDurationTouched] = useState(false);
   const [campaign, setCampaign] = useState<CampaignView | null>(null);
   const [campaignError, setCampaignError] = useState<string | null>(null);
+  const [campaignNotice, setCampaignNotice] = useState<string | null>(null);
   const [isSchedulingCampaign, setIsSchedulingCampaign] = useState(false);
   const [startMode, setStartMode] = useState<"now" | "at">("now");
   const [startAtLocal, setStartAtLocal] = useState("");
@@ -166,8 +184,9 @@ export default function SendPage() {
 
     setIsSchedulingCampaign(true);
     setCampaignError(null);
+    setCampaignNotice(null);
     try {
-      const { id } = await createBackgroundCampaign(
+      const { id, excludedCount } = await createBackgroundCampaign(
         includedDrafts,
         outreachConfig,
         effectiveDurationHours,
@@ -176,7 +195,11 @@ export default function SendPage() {
       window.localStorage.setItem(CAMPAIGN_ID_STORAGE_KEY, id);
       setActiveCampaignId(id);
       await refreshCampaign(id);
+      if (excludedCount > 0) {
+        setCampaignNotice(`Scheduled — ${excludedCount} recipient(s) skipped (already suppressed).`);
+      }
     } catch (err) {
+      setCampaignNotice(null);
       setCampaignError(err instanceof Error ? err.message : "Failed to schedule campaign");
     } finally {
       setIsSchedulingCampaign(false);
@@ -247,6 +270,7 @@ export default function SendPage() {
     setActiveCampaignId(null);
     setCampaign(null);
     setSelectedToSkip(new Set());
+    setCampaignNotice(null);
   }, [setActiveCampaignId]);
 
   const renderSenderStatus = () => {
@@ -440,13 +464,14 @@ export default function SendPage() {
                 </div>
               )}
               <div className="max-h-72 overflow-auto rounded-lg border border-outline/50">
-                <table className="w-full min-w-[640px] border-collapse text-left text-body-sm">
+                <table className="w-full min-w-[760px] border-collapse text-left text-body-sm">
                   <thead className="sticky top-0 bg-surface-container border-b border-outline select-none">
                     <tr>
                       <th className="w-10 px-md py-sm"></th>
                       <th className="px-md py-sm text-[10px] font-bold uppercase tracking-wider text-on-surface-variant">Email Address</th>
                       <th className="px-md py-sm text-[10px] font-bold uppercase tracking-wider text-on-surface-variant">Status</th>
                       <th className="px-md py-sm text-[10px] font-bold uppercase tracking-wider text-on-surface-variant">Account</th>
+                      <th className="px-md py-sm text-[10px] font-bold uppercase tracking-wider text-on-surface-variant">Engagement</th>
                       <th className="px-md py-sm text-[10px] font-bold uppercase tracking-wider text-on-surface-variant">Scheduled</th>
                       <th className="px-md py-sm text-[10px] font-bold uppercase tracking-wider text-on-surface-variant">Detail</th>
                     </tr>
@@ -481,6 +506,7 @@ export default function SendPage() {
                             </span>
                           </td>
                           <td className="px-md py-sm font-mono text-[11px] text-on-surface-variant">{e.accountLabel ?? "—"}</td>
+                          <td className="px-md py-sm font-mono text-[11px] text-on-surface-variant">{engagementLabel(e)}</td>
                           <td className="px-md py-sm font-mono text-[11px] text-on-surface-variant">
                             {new Date(e.scheduledAt).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}
                           </td>
@@ -503,6 +529,13 @@ export default function SendPage() {
               </div>
             </>
           )}
+        </div>
+      )}
+
+      {campaignNotice && (
+        <div className="flex items-start gap-sm rounded-xl border border-emerald-500/20 bg-emerald-500/10 px-md py-sm text-body-sm text-emerald-200">
+          <Icon name="check_circle" className="text-[18px] text-emerald-400" />
+          <span>{campaignNotice}</span>
         </div>
       )}
 

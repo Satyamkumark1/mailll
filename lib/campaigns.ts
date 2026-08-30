@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { sql } from "./db.ts";
 import { computeScheduledTimes } from "./campaign-schedule.ts";
 import { buildEmailHtml, LOGO_CID } from "./email-signature.ts";
@@ -8,6 +9,7 @@ export type CampaignStatus = "running" | "completed" | "canceled";
 export type CampaignEmailStatus = "pending" | "sending" | "sent" | "failed" | "canceled" | "skipped";
 
 export type DeliveryStatus = "delivered" | "bounced" | null;
+export type BounceType = "hard" | "soft" | null;
 
 export interface CampaignEmailSummary {
   id: string;
@@ -22,6 +24,14 @@ export interface CampaignEmailSummary {
   // either bounces it or enough time passes with no bounce to infer delivery.
   deliveryStatus: DeliveryStatus;
   bounceReason: string | null;
+  bounceType: BounceType;
+  // Filled in by the public app/api/t/o and app/api/t/c routes, hit directly
+  // by the recipient's mail client — see lib/tracking.ts.
+  openedAt: string | null;
+  openCount: number;
+  clickedAt: string | null;
+  clickCount: number;
+  unsubscribedAt: string | null;
   // Which sender account actually attempted this send — only set once the
   // row is claimed and dispatched (accounts are picked dynamically at send
   // time, not when the campaign is scheduled), so pending rows show null.
@@ -54,42 +64,67 @@ export interface CreateCampaignInput {
   startAt?: string;
 }
 
-export async function createCampaign({ drafts, config, durationHours, startAt }: CreateCampaignInput): Promise<string> {
+export interface CreateCampaignResult {
+  id: string;
+  // Recipients dropped from this run because they'd already unsubscribed or
+  // hard-bounced previously (see suppressed_emails) — surfaced so the caller
+  // can tell the user why the scheduled count is lower than what they asked
+  // for, instead of silently sending to fewer people than expected.
+  excludedCount: number;
+}
+
+export async function createCampaign({ drafts, config, durationHours, startAt }: CreateCampaignInput): Promise<CreateCampaignResult> {
+  const suppressed = await sql`
+    SELECT email FROM suppressed_emails WHERE email = ANY(${drafts.map((d) => d.email.toLowerCase())}::text[])
+  `;
+  const suppressedSet = new Set(suppressed.map((r) => r.email as string));
+  const includedDrafts = drafts.filter((d) => !suppressedSet.has(d.email.toLowerCase()));
+  if (includedDrafts.length === 0) {
+    throw new Error("All recipients are suppressed — nothing to schedule");
+  }
+
   const now = new Date();
   const requestedStart = startAt ? new Date(startAt) : now;
   const windowStart = requestedStart.getTime() > now.getTime() ? requestedStart : now;
   const windowEnd = new Date(windowStart.getTime() + durationHours * 3600_000);
-  const scheduledTimes = computeScheduledTimes(drafts.length, windowStart, windowEnd);
+  const scheduledTimes = computeScheduledTimes(includedDrafts.length, windowStart, windowEnd);
 
   const [campaign] = await sql`
     INSERT INTO campaigns (window_start, window_end, total_count)
-    VALUES (${windowStart.toISOString()}, ${windowEnd.toISOString()}, ${drafts.length})
+    VALUES (${windowStart.toISOString()}, ${windowEnd.toISOString()}, ${includedDrafts.length})
     RETURNING id
   `;
   const campaignId = campaign.id as string;
+
+  // Row ids are generated here, before insert, rather than left to the
+  // column's gen_random_uuid() default — buildEmailHtml() below needs each
+  // row's id up front to bake per-recipient tracking/unsubscribe links into
+  // the html that actually gets stored and sent.
+  const ids = includedDrafts.map(() => randomUUID());
 
   // The Neon serverless driver is HTTP-based (one round trip per query, no
   // persistent connection) — inserting hundreds of rows one at a time here
   // would mean hundreds of sequential round trips, easily blowing past a
   // Vercel Hobby function's default timeout. unnest() turns it into one.
-  const toEmails = drafts.map((d) => d.email);
-  const subjects = drafts.map((d) => d.subject);
-  const bodies = drafts.map((d) => d.body);
-  const htmls = drafts.map((d) => buildEmailHtml(config, d.body, `cid:${LOGO_CID}`));
+  const toEmails = includedDrafts.map((d) => d.email);
+  const subjects = includedDrafts.map((d) => d.subject);
+  const bodies = includedDrafts.map((d) => d.body);
+  const htmls = includedDrafts.map((d, i) => buildEmailHtml(config, d.body, `cid:${LOGO_CID}`, ids[i]));
   const scheduledAt = scheduledTimes.map((t) => t.toISOString());
 
   await sql`
-    INSERT INTO campaign_emails (campaign_id, to_email, subject, body, html, scheduled_at)
-    SELECT ${campaignId}, * FROM unnest(
+    INSERT INTO campaign_emails (id, campaign_id, to_email, subject, body, html, scheduled_at)
+    SELECT id, ${campaignId}, * FROM unnest(
+      ${ids}::uuid[],
       ${toEmails}::text[],
       ${subjects}::text[],
       ${bodies}::text[],
       ${htmls}::text[],
       ${scheduledAt}::timestamptz[]
-    )
+    ) AS t(id, to_email, subject, body, html, scheduled_at)
   `;
 
-  return campaignId;
+  return { id: campaignId, excludedCount: drafts.length - includedDrafts.length };
 }
 
 export async function listCampaigns(limit = 50): Promise<CampaignListItem[]> {
@@ -117,7 +152,8 @@ export async function getCampaign(id: string): Promise<CampaignSummary | null> {
   if (!campaign) return null;
 
   const emails = await sql`
-    SELECT ce.id, ce.to_email, ce.status, ce.error, ce.sent_at, ce.scheduled_at, ce.delivery_status, ce.bounce_reason, sa.label AS account_label
+    SELECT ce.id, ce.to_email, ce.status, ce.error, ce.sent_at, ce.scheduled_at, ce.delivery_status, ce.bounce_reason,
+      ce.bounce_type, ce.opened_at, ce.open_count, ce.clicked_at, ce.click_count, ce.unsubscribed_at, sa.label AS account_label
     FROM campaign_emails ce
     LEFT JOIN sender_accounts sa ON sa.id = ce.account_id
     WHERE ce.campaign_id = ${id}
@@ -144,6 +180,12 @@ export async function getCampaign(id: string): Promise<CampaignSummary | null> {
       scheduledAt: e.scheduled_at as string,
       deliveryStatus: (e.delivery_status as DeliveryStatus) ?? null,
       bounceReason: (e.bounce_reason as string | null) ?? null,
+      bounceType: (e.bounce_type as BounceType) ?? null,
+      openedAt: (e.opened_at as string | null) ?? null,
+      openCount: (e.open_count as number) ?? 0,
+      clickedAt: (e.clicked_at as string | null) ?? null,
+      clickCount: (e.click_count as number) ?? 0,
+      unsubscribedAt: (e.unsubscribed_at as string | null) ?? null,
       accountLabel: (e.account_label as string | null) ?? null,
     })),
   };

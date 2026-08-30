@@ -3,12 +3,16 @@ import path from "node:path";
 import { LOGO_CID } from "./email-signature.ts";
 import { getDecryptedSmtpPassword, type SenderAccount } from "./sender-accounts.ts";
 import { ELEVIQUE_OUTREACH_CONFIG } from "./store.ts";
+import { trackingUnsubscribeUrl } from "./tracking.ts";
 
 export interface SendMailInput {
   to: string;
   subject: string;
   text: string;
   html?: string;
+  // The campaign_emails row this send corresponds to — used to build a
+  // working List-Unsubscribe link (see lib/tracking.ts).
+  emailId: string;
 }
 
 // No caching: an account's credentials can change at runtime via Settings,
@@ -52,7 +56,7 @@ function describeSendError(err: unknown): string {
 // only lives in one place. Every account sends under the same brand display
 // name (uniform sender identity across the account pool) — only the address
 // varies, via `account`.
-export async function sendMailDirect(account: SenderAccount, { to, subject, text, html }: SendMailInput): Promise<void> {
+export async function sendMailDirect(account: SenderAccount, { to, subject, text, html, emailId }: SendMailInput): Promise<void> {
   const transporter = getTransporter(account);
 
   try {
@@ -61,6 +65,14 @@ export async function sendMailDirect(account: SenderAccount, { to, subject, text
       to,
       subject,
       text,
+      // List-Unsubscribe-Post is what makes Gmail/Outlook show their native
+      // one-click "Unsubscribe" affordance next to the sender name (RFC
+      // 8058), rather than relying on the recipient finding the link buried
+      // in the body.
+      headers: {
+        "List-Unsubscribe": `<mailto:${ELEVIQUE_OUTREACH_CONFIG.contactEmail}?subject=unsubscribe>, <${trackingUnsubscribeUrl(emailId)}>`,
+        "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+      },
       ...(html
         ? {
             html,

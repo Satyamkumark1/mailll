@@ -51,6 +51,10 @@ export async function POST(request: Request) {
     );
   }
 
-  const id = await createCampaign({ drafts, config, durationHours, startAt });
-  return Response.json({ id });
+  try {
+    const { id, excludedCount } = await createCampaign({ drafts, config, durationHours, startAt });
+    return Response.json({ id, excludedCount });
+  } catch (err) {
+    return Response.json({ error: err instanceof Error ? err.message : "Failed to schedule campaign" }, { status: 400 });
+  }
 }

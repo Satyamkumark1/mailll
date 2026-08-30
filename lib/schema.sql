@@ -49,6 +49,29 @@ CREATE INDEX IF NOT EXISTS campaign_emails_campaign_idx ON campaign_emails (camp
 ALTER TABLE campaign_emails ADD COLUMN IF NOT EXISTS delivery_status TEXT;
 ALTER TABLE campaign_emails ADD COLUMN IF NOT EXISTS bounce_reason TEXT;
 ALTER TABLE campaign_emails ADD COLUMN IF NOT EXISTS bounce_checked_at TIMESTAMPTZ;
+-- 'hard' (permanent — 5xx) | 'soft' (transient — 4xx) | null, set alongside
+-- delivery_status by lib/bounce-checker.ts. A hard bounce also suppresses the
+-- address for good (see suppressed_emails below).
+ALTER TABLE campaign_emails ADD COLUMN IF NOT EXISTS bounce_type TEXT;
+-- Filled in by app/api/t/o (open pixel) and app/api/t/c (click redirect) —
+-- both public, unauthenticated routes hit by the recipient's mail client, not
+-- a logged-in user (see middleware.ts).
+ALTER TABLE campaign_emails ADD COLUMN IF NOT EXISTS opened_at TIMESTAMPTZ;
+ALTER TABLE campaign_emails ADD COLUMN IF NOT EXISTS open_count INT NOT NULL DEFAULT 0;
+ALTER TABLE campaign_emails ADD COLUMN IF NOT EXISTS clicked_at TIMESTAMPTZ;
+ALTER TABLE campaign_emails ADD COLUMN IF NOT EXISTS click_count INT NOT NULL DEFAULT 0;
+ALTER TABLE campaign_emails ADD COLUMN IF NOT EXISTS unsubscribed_at TIMESTAMPTZ;
+
+-- Durable, campaign-independent suppression list. A per-row unsubscribed_at
+-- above only marks that one send — this is what actually stops the same
+-- address being re-targeted by a future campaign built off a freshly
+-- uploaded list. Populated by app/api/t/u (unsubscribe) and by
+-- lib/bounce-checker.ts on a hard bounce; checked by createCampaign().
+CREATE TABLE IF NOT EXISTS suppressed_emails (
+  email TEXT PRIMARY KEY,
+  reason TEXT NOT NULL, -- 'unsubscribe' | 'hard_bounce'
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 
 CREATE TABLE IF NOT EXISTS send_attempts (
   sent_at TIMESTAMPTZ NOT NULL DEFAULT now(),

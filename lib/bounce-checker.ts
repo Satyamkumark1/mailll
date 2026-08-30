@@ -33,6 +33,20 @@ function extractDiagnostic(dsnText: string): string | null {
   return match ? match[1].trim().slice(0, 300) : null;
 }
 
+// RFC 3463 enhanced status code (x.y.z) or a bare SMTP reply code: a 5.x.x/5xx
+// is permanent (bad address, domain gone — safe to suppress for good), a
+// 4.x.x/4xx is transient (mailbox full, greylisted — will likely work later).
+// No recognizable code at all defaults to 'soft', matching this codebase's
+// existing bias elsewhere (lib/smtp-verifier.ts retries once before
+// finalizing "invalid") of not permanently suppressing on an ambiguous signal.
+export function classifyBounceType(dsnText: string): "hard" | "soft" {
+  const enhanced = dsnText.match(/\b([45])\.\d{1,3}\.\d{1,3}\b/);
+  if (enhanced) return enhanced[1] === "5" ? "hard" : "soft";
+  const bare = dsnText.match(/\b([45])\d{2}\b/);
+  if (bare) return bare[1] === "5" ? "hard" : "soft";
+  return "soft";
+}
+
 function isContentTypeDeliveryReport(headers: Map<string, unknown>): boolean {
   const contentType = headers.get("content-type") as { value?: string; params?: Record<string, string> } | undefined;
   return contentType?.value === "multipart/report" && contentType.params?.["report-type"] === "delivery-status";
@@ -53,16 +67,28 @@ async function processMessage(source: Buffer): Promise<void> {
   if (!recipient) return;
 
   const reason = extractDiagnostic(dsnText) ?? subject.slice(0, 300) ?? null;
-  await sql`
+  const bounceType = classifyBounceType(dsnText);
+  const [updated] = await sql`
     UPDATE campaign_emails
-    SET delivery_status = 'bounced', bounce_reason = ${reason}, bounce_checked_at = now()
+    SET delivery_status = 'bounced', bounce_reason = ${reason}, bounce_type = ${bounceType}, bounce_checked_at = now()
     WHERE id = (
       SELECT id FROM campaign_emails
       WHERE to_email = ${recipient} AND status = 'sent' AND delivery_status IS NULL
       ORDER BY sent_at DESC
       LIMIT 1
     )
+    RETURNING id
   `;
+
+  // A hard bounce means the address itself is gone — suppress it for good so
+  // no future campaign re-targets it, rather than relying on someone to
+  // notice and remove it by hand.
+  if (bounceType === "hard" && updated) {
+    await sql`
+      INSERT INTO suppressed_emails (email, reason) VALUES (${recipient}, 'hard_bounce')
+      ON CONFLICT (email) DO NOTHING
+    `;
+  }
 }
 
 async function markInferredDelivered(): Promise<void> {
