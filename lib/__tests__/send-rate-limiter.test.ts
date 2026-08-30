@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { computeRateLimitStatus, type RateLimitConfig } from "../send-rate-limiter.ts";
+import { computeRateLimitStatus, pickLeastLoadedAccount, type AccountLoad, type RateLimitConfig } from "../send-rate-limiter.ts";
 
 const defaultConfig: RateLimitConfig = {
   hourlyCap: 20,
@@ -97,4 +97,28 @@ test("retryAfterSeconds takes max of hourly and daily when both are blocking", (
 
   assert.equal(status.allowed, false);
   assert.equal(status.retryAfterSeconds, 86390);
+});
+
+test("pickLeastLoadedAccount returns null for an empty candidate list", () => {
+  assert.equal(pickLeastLoadedAccount([]), null);
+});
+
+test("pickLeastLoadedAccount picks by fraction of cap used, not raw count", () => {
+  const candidates: AccountLoad[] = [
+    // 80/150 = 53% used — more raw sends, but a bigger cap.
+    { accountId: 1, hourlyUsed: 8, hourlyCap: 20, dailyUsed: 80, dailyCap: 150 },
+    // 40/50 = 80% used — fewer raw sends, but a smaller cap, so more loaded.
+    { accountId: 2, hourlyUsed: 4, hourlyCap: 20, dailyUsed: 40, dailyCap: 50 },
+  ];
+  assert.equal(pickLeastLoadedAccount(candidates), 1);
+});
+
+test("pickLeastLoadedAccount uses whichever of hourly/daily fraction is worse", () => {
+  const candidates: AccountLoad[] = [
+    // Fine on daily (10%) but maxed hourly (100%).
+    { accountId: 1, hourlyUsed: 10, hourlyCap: 10, dailyUsed: 10, dailyCap: 100 },
+    // Comfortable on both.
+    { accountId: 2, hourlyUsed: 1, hourlyCap: 10, dailyUsed: 10, dailyCap: 100 },
+  ];
+  assert.equal(pickLeastLoadedAccount(candidates), 2);
 });

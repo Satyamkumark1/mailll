@@ -1,6 +1,14 @@
 import { checkBounces } from "@/lib/bounce-checker";
-import { claimDueEmails, recordEmailResult, releaseEmail } from "@/lib/campaigns";
-import { reserveSendSlot } from "@/lib/send-rate-limiter";
+import {
+  claimDueEmails,
+  recordEmailResult,
+  releaseEmail,
+  summarizeDispatchResults,
+  type DispatchOutcome,
+  type DueEmail,
+} from "@/lib/campaigns";
+import { listAccounts, type SenderAccount } from "@/lib/sender-accounts";
+import { peekAccountRateLimitStatus, pickLeastLoadedAccount, reserveSendSlot, type AccountLoad } from "@/lib/send-rate-limiter";
 import { sendMailDirect } from "@/lib/send-mail";
 
 export const runtime = "nodejs";
@@ -8,15 +16,16 @@ export const runtime = "nodejs";
 // shorter) since each due email costs a real SMTP round trip.
 export const maxDuration = 60;
 
-// One at a time — an external cron pings this every ~1 minute anyway, so
-// throughput comes from tick frequency, not batch size. Keeping this at 1
-// bounds each invocation's blast radius to a single real SMTP round trip:
-// if a batch of 3 sequential sends occasionally ran long enough to hit the
-// 60s maxDuration below, Vercel would kill the invocation after a rate-limit
-// slot was reserved for one of them but before its result got recorded,
-// wasting that slot (it only gets picked back up 2 minutes later via
-// claimDueEmails' stuck-row retry, by which point it costs a second slot).
-const BATCH_SIZE = 1;
+// One claimed row per currently-healthy account (capped regardless of how
+// many accounts exist), dispatched concurrently. An external cron pings
+// this endpoint every ~1 minute — with a single account and a batch of 1,
+// that's a ceiling of ~1,440 emails/day, already below a multi-thousand/day
+// combined target across several accounts. Scaling the batch to the
+// account count and sending in parallel (not a sequential loop) raises that
+// ceiling without reintroducing the risk a sequential multi-send batch
+// would have: wall-clock time per tick stays close to the single slowest
+// send, not the sum, so maxDuration risk doesn't grow with account count.
+const MAX_BATCH_SIZE = 10;
 
 function isAuthorized(request: Request): boolean {
   const secret = process.env.CRON_SECRET;
@@ -28,38 +37,107 @@ function isAuthorized(request: Request): boolean {
   return queryToken === secret || bearerToken === secret;
 }
 
-async function tick() {
-  const due = await claimDueEmails(BATCH_SIZE);
-  let sent = 0;
-  let failed = 0;
-  let deferred = 0;
-
-  for (const email of due) {
-    const rateLimit = await reserveSendSlot("campaign");
-    if (!rateLimit.allowed) {
-      await releaseEmail(email.id);
-      deferred++;
-      continue;
-    }
-
-    try {
-      await sendMailDirect({ to: email.toEmail, subject: email.subject, text: email.body, html: email.html });
-      await recordEmailResult(email.id, email.campaignId, { status: "sent" });
-      sent++;
-    } catch (err) {
-      await recordEmailResult(email.id, email.campaignId, {
-        status: "failed",
-        error: err instanceof Error ? err.message : "Send failed",
-      });
-      failed++;
-    }
+async function sendOne(email: DueEmail, account: SenderAccount): Promise<DispatchOutcome> {
+  // The live DB check here — not the in-memory snapshot used to pick this
+  // account — is the sole authority on whether this send is actually
+  // allowed. A stale snapshot can produce a suboptimal pick, never a cap
+  // breach: if this account and its slot already got used elsewhere between
+  // the snapshot and now, this simply defers instead of over-sending.
+  const reservation = await reserveSendSlot(account, "campaign");
+  if (!reservation.allowed) {
+    await releaseEmail(email.id);
+    return "deferred";
   }
+
+  try {
+    await sendMailDirect(account, { to: email.toEmail, subject: email.subject, text: email.body, html: email.html });
+    await recordEmailResult(email.id, email.campaignId, account.id, { status: "sent" });
+    return "sent";
+  } catch (err) {
+    await recordEmailResult(email.id, email.campaignId, account.id, {
+      status: "failed",
+      error: err instanceof Error ? err.message : "Send failed",
+    });
+    return "failed";
+  }
+}
+
+async function tick() {
+  const accounts = await listAccounts();
+  const active = accounts.filter((a) => a.status === "active");
+
+  const snapshots = await Promise.all(
+    active.map(async (account) => ({ account, status: await peekAccountRateLimitStatus(account) }))
+  );
+  const healthy = snapshots.filter((s) => s.status.allowed);
+
+  if (healthy.length === 0) {
+    // Best-effort and self-throttling — runs even when nothing can send so
+    // bounce confirmations keep flowing.
+    await checkBounces();
+    return { claimed: 0, sent: 0, failed: 0, deferred: 0 };
+  }
+
+  const due = await claimDueEmails(Math.min(healthy.length, MAX_BATCH_SIZE));
+
+  const loadById = new Map<number, AccountLoad>(
+    healthy.map((h) => [
+      h.account.id,
+      {
+        accountId: h.account.id,
+        hourlyUsed: h.status.hourly.used,
+        hourlyCap: h.status.hourly.cap,
+        dailyUsed: h.status.daily.used,
+        dailyCap: h.status.daily.cap,
+      },
+    ])
+  );
+  const accountById = new Map(healthy.map((h) => [h.account.id, h.account]));
+
+  // Assigned synchronously, before any await, so concurrent dispatch below
+  // can't all pick the same "most idle" account for different rows.
+  const assignments = due.map((email) => {
+    const accountId = pickLeastLoadedAccount([...loadById.values()]);
+    if (accountId !== null) {
+      const load = loadById.get(accountId)!;
+      load.hourlyUsed += 1;
+      load.dailyUsed += 1;
+    }
+    return { email, accountId };
+  });
+
+  const results = await Promise.allSettled(
+    assignments.map(({ email, accountId }): Promise<DispatchOutcome> => {
+      const account = accountId !== null ? accountById.get(accountId) : undefined;
+      return account ? sendOne(email, account) : releaseEmail(email.id).then((): DispatchOutcome => "deferred");
+    })
+  );
+
+  // A rejected promise means something threw before sendOne (or the
+  // no-account releaseEmail fallback above) could record any outcome at
+  // all — e.g. a transient DB error inside reserveSendSlot or
+  // recordEmailResult. Recover the claimed row with the same
+  // claim-recovery policy as a rate-limit block (releaseEmail) instead of
+  // leaving it to rot until claimDueEmails' passive 2-minute stuck-row
+  // sweep, and log it — summarizeDispatchResults below counts it too, so
+  // it isn't silently dropped from the tick's totals.
+  await Promise.all(
+    results.map((r, i) => {
+      if (r.status !== "rejected") return undefined;
+      console.error("Unhandled error dispatching email", assignments[i].email.id, ":", r.reason);
+      return releaseEmail(assignments[i].email.id).catch((releaseErr) =>
+        console.error("Failed to release claimed email", assignments[i].email.id, "after dispatch error:", releaseErr)
+      );
+    })
+  );
+
+  const summary = summarizeDispatchResults(results);
 
   // Best-effort and self-throttling (see checkBounces) — runs after the real
   // send work so a slow/unreachable IMAP server never delays actual sends.
   await checkBounces();
 
-  return { claimed: due.length, sent, failed, deferred };
+  return { claimed: due.length, ...summary };
 }
 
 export async function GET(request: Request) {

@@ -6,7 +6,15 @@ import { useRouter, useSelectedLayoutSegment } from "next/navigation";
 import { AnimatePresence, motion } from "framer-motion";
 import { Icon } from "@/components/icon";
 import { Logo } from "@/components/logo";
-import { getSenderSettingsView, resetWarmupClient, saveSenderSettingsView, type SenderSettingsView } from "@/lib/settings-client";
+import {
+  createAccountView,
+  listAccountsView,
+  pauseAccountView,
+  resetWarmupView,
+  resumeAccountView,
+  updateAccountView,
+  type AccountView,
+} from "@/lib/accounts-client";
 import { useValidatorStore, type Tab } from "@/lib/store";
 import { TABS } from "@/lib/tabs";
 import { cn, computeDraftsStale } from "@/lib/utils";
@@ -52,8 +60,8 @@ type GuardedAction = (description: string, run: () => void) => void;
 
 interface ValidatorChrome {
   confirmAction: (message: string, options?: ConfirmOptions) => Promise<boolean>;
-  settingsView: SenderSettingsView | null;
-  refreshSettingsView: () => Promise<void>;
+  accounts: AccountView[] | null;
+  refreshAccounts: () => Promise<void>;
   openSettings: () => void;
   setGuardedAction: (fn: GuardedAction | null) => void;
 }
@@ -129,9 +137,12 @@ export default function ValidatorLayout({ children }: { children: React.ReactNod
     []
   );
 
-  const [settingsView, setSettingsView] = useState<SenderSettingsView | null>(null);
+  const [accounts, setAccounts] = useState<AccountView[] | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [settingsForm, setSettingsForm] = useState({
+  const [modalView, setModalView] = useState<"list" | "form">("list");
+  const [editingAccountId, setEditingAccountId] = useState<number | null>(null);
+  const [accountForm, setAccountForm] = useState({
+    label: "",
     smtpHost: "",
     smtpPort: 465,
     smtpUser: "",
@@ -142,76 +153,115 @@ export default function ValidatorLayout({ children }: { children: React.ReactNod
   });
   const [settingsError, setSettingsError] = useState<string | null>(null);
   const [settingsWarning, setSettingsWarning] = useState<string | null>(null);
-  const [isSavingSettings, setIsSavingSettings] = useState(false);
-  const [isResettingWarmup, setIsResettingWarmup] = useState(false);
+  const [isSavingAccount, setIsSavingAccount] = useState(false);
+  const [resettingWarmupId, setResettingWarmupId] = useState<number | null>(null);
+  const [togglingStatusId, setTogglingStatusId] = useState<number | null>(null);
 
-  const refreshSettingsView = useCallback(() => {
-    return getSenderSettingsView()
-      .then(setSettingsView)
-      .catch(() => {});
+  const refreshAccounts = useCallback(() => {
+    return listAccountsView()
+      .then(setAccounts)
+      .catch((err) => {
+        setAccounts([]);
+        setSettingsError(err instanceof Error ? err.message : "Failed to load accounts");
+      });
   }, []);
 
   useEffect(() => {
-    refreshSettingsView();
-  }, [refreshSettingsView]);
+    refreshAccounts();
+  }, [refreshAccounts]);
 
   const openSettings = useCallback(() => {
-    if (settingsView) {
-      setSettingsForm({
-        smtpHost: settingsView.smtpHost,
-        smtpPort: settingsView.smtpPort,
-        smtpUser: settingsView.smtpUser,
-        smtpPassword: "",
-        hourlyCap: settingsView.hourlyCap,
-        dailyCap: settingsView.dailyCap,
-        warmupEnabled: settingsView.warmupEnabled,
-      });
-    }
+    setModalView("list");
+    setEditingAccountId(null);
     setSettingsError(null);
     setSettingsWarning(null);
     setSettingsOpen(true);
-  }, [settingsView]);
+  }, []);
 
-  const saveSettings = useCallback(async () => {
-    setIsSavingSettings(true);
+  const openAddAccountForm = useCallback(() => {
+    setAccountForm({ label: "", smtpHost: "", smtpPort: 465, smtpUser: "", smtpPassword: "", hourlyCap: 35, dailyCap: 150, warmupEnabled: true });
+    setEditingAccountId(null);
+    setSettingsError(null);
+    setSettingsWarning(null);
+    setModalView("form");
+  }, []);
+
+  const openEditAccountForm = useCallback((account: AccountView) => {
+    setAccountForm({
+      label: account.label,
+      smtpHost: account.smtpHost,
+      smtpPort: account.smtpPort,
+      smtpUser: account.smtpUser,
+      smtpPassword: "",
+      hourlyCap: account.hourlyCap,
+      dailyCap: account.dailyCap,
+      warmupEnabled: account.warmupEnabled,
+    });
+    setEditingAccountId(account.id);
+    setSettingsError(null);
+    setSettingsWarning(null);
+    setModalView("form");
+  }, []);
+
+  const saveAccount = useCallback(async () => {
+    setIsSavingAccount(true);
     setSettingsError(null);
     setSettingsWarning(null);
     try {
-      const { warning } = await saveSenderSettingsView({
-        smtpHost: settingsForm.smtpHost,
-        smtpPort: settingsForm.smtpPort,
-        smtpUser: settingsForm.smtpUser,
-        smtpPassword: settingsForm.smtpPassword || undefined,
-        hourlyCap: settingsForm.hourlyCap,
-        dailyCap: settingsForm.dailyCap,
-        warmupEnabled: settingsForm.warmupEnabled,
-      });
+      const payload = {
+        label: accountForm.label || undefined,
+        smtpHost: accountForm.smtpHost,
+        smtpPort: accountForm.smtpPort,
+        smtpUser: accountForm.smtpUser,
+        smtpPassword: accountForm.smtpPassword || undefined,
+        hourlyCap: accountForm.hourlyCap,
+        dailyCap: accountForm.dailyCap,
+        warmupEnabled: accountForm.warmupEnabled,
+      };
+      const { warning } =
+        editingAccountId !== null ? await updateAccountView(editingAccountId, payload) : await createAccountView(payload);
       setSettingsWarning(warning);
-      await refreshSettingsView();
-      if (!warning) setSettingsOpen(false);
+      await refreshAccounts();
+      if (!warning) setModalView("list");
     } catch (err) {
-      setSettingsError(err instanceof Error ? err.message : "Failed to save settings");
+      setSettingsError(err instanceof Error ? err.message : "Failed to save account");
     } finally {
-      setIsSavingSettings(false);
+      setIsSavingAccount(false);
     }
-  }, [settingsForm, refreshSettingsView]);
+  }, [accountForm, editingAccountId, refreshAccounts]);
 
-  const handleResetWarmup = useCallback(async () => {
+  const handleResetWarmup = useCallback(async (accountId: number) => {
     const confirmed = await confirmAction(
-      "Restart the warm-up ramp from the floor? Use this after a Zoho block clears.",
+      "Restart this account's warm-up ramp from the floor? Use this after a Zoho block clears.",
       { title: "Restart warm-up ramp?", confirmLabel: "Restart warm-up", tone: "warning" }
     );
     if (!confirmed) return;
-    setIsResettingWarmup(true);
+    setResettingWarmupId(accountId);
     try {
-      await resetWarmupClient();
-      await refreshSettingsView();
+      await resetWarmupView(accountId);
+      await refreshAccounts();
     } catch (err) {
       setSettingsError(err instanceof Error ? err.message : "Failed to reset warm-up");
     } finally {
-      setIsResettingWarmup(false);
+      setResettingWarmupId(null);
     }
-  }, [refreshSettingsView, confirmAction]);
+  }, [refreshAccounts, confirmAction]);
+
+  const handleToggleAccountStatus = useCallback(async (account: AccountView) => {
+    setTogglingStatusId(account.id);
+    try {
+      if (account.status === "active") {
+        await pauseAccountView(account.id);
+      } else {
+        await resumeAccountView(account.id);
+      }
+      await refreshAccounts();
+    } catch (err) {
+      setSettingsError(err instanceof Error ? err.message : "Failed to update account status");
+    } finally {
+      setTogglingStatusId(null);
+    }
+  }, [refreshAccounts]);
 
   const [user, setUser] = useState<{ email: string } | null>(null);
 
@@ -245,8 +295,8 @@ export default function ValidatorLayout({ children }: { children: React.ReactNod
   };
 
   const chrome = useMemo<ValidatorChrome>(
-    () => ({ confirmAction, settingsView, refreshSettingsView, openSettings, setGuardedAction }),
-    [confirmAction, settingsView, refreshSettingsView, openSettings]
+    () => ({ confirmAction, accounts, refreshAccounts, openSettings, setGuardedAction }),
+    [confirmAction, accounts, refreshAccounts, openSettings]
   );
 
   const userInitial = user?.email ? user.email.charAt(0).toUpperCase() : "U";
@@ -425,7 +475,9 @@ export default function ValidatorLayout({ children }: { children: React.ReactNod
             <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/75 p-md backdrop-blur-sm" role="presentation">
               <div role="dialog" aria-modal="true" aria-labelledby="settings-title" className="w-full max-w-[32rem] max-h-[85vh] overflow-y-auto rounded-2xl border border-outline bg-surface p-lg shadow-2xl space-y-md">
                 <div className="flex items-center justify-between">
-                  <h2 id="settings-title" className="text-headline-md font-bold text-on-surface">Sender Settings</h2>
+                  <h2 id="settings-title" className="text-headline-md font-bold text-on-surface">
+                    {modalView === "list" ? "Sender Accounts" : editingAccountId !== null ? "Edit Account" : "Add Account"}
+                  </h2>
                   <button onClick={() => setSettingsOpen(false)} className="text-on-surface-variant hover:text-on-surface cursor-pointer">
                     <Icon name="close" className="text-[20px]" />
                   </button>
@@ -444,124 +496,222 @@ export default function ValidatorLayout({ children }: { children: React.ReactNod
                   </div>
                 )}
 
-                <div className="space-y-sm">
-                  <span className="text-[10px] font-bold text-on-surface-variant uppercase tracking-wider">SMTP Account</span>
-                  <div className="grid grid-cols-2 gap-sm">
-                    <label className="col-span-2 flex flex-col gap-xs">
-                      <span className="text-xs text-on-surface-variant font-semibold">Host</span>
-                      <input
-                        type="text"
-                        value={settingsForm.smtpHost}
-                        onChange={(e) => setSettingsForm({ ...settingsForm, smtpHost: e.target.value })}
-                        placeholder="smtp.zoho.in"
-                        className="rounded-lg border border-outline bg-surface-container-low px-md py-sm text-body-sm text-on-surface font-mono"
-                      />
-                    </label>
-                    <label className="flex flex-col gap-xs">
-                      <span className="text-xs text-on-surface-variant font-semibold">Port</span>
-                      <input
-                        type="number"
-                        value={settingsForm.smtpPort}
-                        onChange={(e) => setSettingsForm({ ...settingsForm, smtpPort: Number(e.target.value) || 465 })}
-                        className="rounded-lg border border-outline bg-surface-container-low px-md py-sm text-body-sm text-on-surface font-mono"
-                      />
-                    </label>
-                    <label className="flex flex-col gap-xs">
-                      <span className="text-xs text-on-surface-variant font-semibold">User (from-address)</span>
-                      <input
-                        type="text"
-                        value={settingsForm.smtpUser}
-                        onChange={(e) => setSettingsForm({ ...settingsForm, smtpUser: e.target.value })}
-                        placeholder="hello@yourcompany.com"
-                        className="rounded-lg border border-outline bg-surface-container-low px-md py-sm text-body-sm text-on-surface font-mono"
-                      />
-                    </label>
-                    <label className="col-span-2 flex flex-col gap-xs">
-                      <span className="text-xs text-on-surface-variant font-semibold">Password</span>
-                      <input
-                        type="password"
-                        value={settingsForm.smtpPassword}
-                        onChange={(e) => setSettingsForm({ ...settingsForm, smtpPassword: e.target.value })}
-                        placeholder={settingsView?.hasPassword ? "•••••••• (leave blank to keep current)" : "required"}
-                        className="rounded-lg border border-outline bg-surface-container-low px-md py-sm text-body-sm text-on-surface font-mono"
-                      />
-                    </label>
+                {modalView === "list" ? (
+                  <div className="space-y-md">
+                    <div className="flex items-center justify-between">
+                      <p className="text-xs text-on-surface-variant">
+                        Recipients are auto-assigned across every active account, least-loaded first.
+                      </p>
+                      <button
+                        onClick={openAddAccountForm}
+                        className="shrink-0 rounded-lg border border-primary/40 bg-primary/10 px-sm py-xs text-xs font-bold text-primary transition-colors hover:bg-primary/20 cursor-pointer"
+                      >
+                        + Add account
+                      </button>
+                    </div>
+
+                    {accounts === null ? (
+                      <p className="text-body-sm text-on-surface-variant">Loading...</p>
+                    ) : accounts.length === 0 ? (
+                      <p className="text-body-sm text-on-surface-variant">No sender accounts configured yet — add one to start sending.</p>
+                    ) : (
+                      <div className="space-y-sm">
+                        {accounts.map((account) => (
+                          <div key={account.id} className="rounded-lg border border-outline bg-surface-container-low p-md space-y-xs">
+                            <div className="flex items-center justify-between gap-sm">
+                              <div className="min-w-0">
+                                <p className="text-body-sm font-bold text-on-surface truncate">{account.label}</p>
+                                <p className="font-mono text-xs text-on-surface-variant truncate">{account.smtpUser}</p>
+                              </div>
+                              <span
+                                className={cn(
+                                  "shrink-0 rounded px-sm py-[2px] text-[10px] font-bold uppercase",
+                                  account.status === "active"
+                                    ? "bg-primary/10 text-primary border border-primary/20"
+                                    : "bg-amber-500/10 text-amber-400 border border-amber-500/20"
+                                )}
+                              >
+                                {account.status}
+                              </span>
+                            </div>
+                            {account.status === "paused" && (
+                              <p className="text-xs text-amber-300">
+                                Paused after {account.consecutiveFailures} failed send(s) in a row.
+                              </p>
+                            )}
+                            {account.effective.warmupActive && (
+                              <p className="text-xs font-mono text-primary font-semibold">
+                                {account.effective.hourlyCap}/{account.effective.hourlyTarget} per hour (day {account.effective.warmupDay} of {account.effective.warmupDays})
+                              </p>
+                            )}
+                            <div className="flex flex-wrap gap-xs pt-1">
+                              <button
+                                onClick={() => openEditAccountForm(account)}
+                                className="rounded-lg border border-outline bg-surface px-sm py-xs text-xs font-bold text-on-surface transition-colors hover:bg-surface-container cursor-pointer"
+                              >
+                                Edit
+                              </button>
+                              <button
+                                onClick={() => handleResetWarmup(account.id)}
+                                disabled={resettingWarmupId === account.id}
+                                className="rounded-lg border border-outline bg-surface px-sm py-xs text-xs font-bold text-on-surface transition-colors hover:bg-surface-container cursor-pointer disabled:opacity-50"
+                              >
+                                {resettingWarmupId === account.id ? "Resetting..." : "Reset warm-up"}
+                              </button>
+                              <button
+                                onClick={() => handleToggleAccountStatus(account)}
+                                disabled={togglingStatusId === account.id}
+                                className={cn(
+                                  "rounded-lg border px-sm py-xs text-xs font-bold cursor-pointer disabled:opacity-50",
+                                  account.status === "active"
+                                    ? "border-red-500/25 bg-red-500/10 text-red-300 hover:bg-red-500/20"
+                                    : "border-primary/40 bg-primary/10 text-primary hover:bg-primary/20"
+                                )}
+                              >
+                                {togglingStatusId === account.id ? "Updating..." : account.status === "active" ? "Pause" : "Resume"}
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    <div className="flex justify-end pt-sm">
+                      <button
+                        onClick={() => setSettingsOpen(false)}
+                        className="rounded-lg border border-outline bg-surface-container-low px-md py-sm text-label-md font-bold text-on-surface-variant transition-colors hover:text-on-surface cursor-pointer"
+                      >
+                        Close
+                      </button>
+                    </div>
                   </div>
-                </div>
+                ) : (
+                  <div className="space-y-md">
+                    <button
+                      onClick={() => setModalView("list")}
+                      className="flex items-center gap-1 text-xs font-bold text-on-surface-variant hover:text-on-surface cursor-pointer"
+                    >
+                      <Icon name="arrow_back" className="text-[16px]" /> Back to accounts
+                    </button>
 
-                <div className="space-y-sm pt-sm border-t border-outline/50">
-                  <span className="text-[10px] font-bold text-on-surface-variant uppercase tracking-wider">Send Limits</span>
-                  <p className="text-xs text-on-surface-variant">
-                    Zoho&apos;s external sending is reputation-based, dynamically capped at 50-500/hr — going above 50 without an established sending history risks another block; 500 is Zoho&apos;s documented absolute ceiling.
-                  </p>
-                  <div className="grid grid-cols-2 gap-sm">
-                    <label className="flex flex-col gap-xs">
-                      <span className="text-xs text-on-surface-variant font-semibold">Hourly cap</span>
-                      <input
-                        type="number"
-                        value={settingsForm.hourlyCap}
-                        onChange={(e) => setSettingsForm({ ...settingsForm, hourlyCap: Number(e.target.value) || 1 })}
-                        className="rounded-lg border border-outline bg-surface-container-low px-md py-sm text-body-sm text-on-surface font-mono"
-                      />
-                    </label>
-                    <label className="flex flex-col gap-xs">
-                      <span className="text-xs text-on-surface-variant font-semibold">Daily cap</span>
-                      <input
-                        type="number"
-                        value={settingsForm.dailyCap}
-                        onChange={(e) => setSettingsForm({ ...settingsForm, dailyCap: Number(e.target.value) || 1 })}
-                        className="rounded-lg border border-outline bg-surface-container-low px-md py-sm text-body-sm text-on-surface font-mono"
-                      />
-                    </label>
+                    <div className="space-y-sm">
+                      <span className="text-[10px] font-bold text-on-surface-variant uppercase tracking-wider">SMTP Account</span>
+                      <div className="grid grid-cols-2 gap-sm">
+                        <label className="col-span-2 flex flex-col gap-xs">
+                          <span className="text-xs text-on-surface-variant font-semibold">Label (optional)</span>
+                          <input
+                            type="text"
+                            value={accountForm.label}
+                            onChange={(e) => setAccountForm({ ...accountForm, label: e.target.value })}
+                            placeholder="e.g. Sales — Priya"
+                            className="rounded-lg border border-outline bg-surface-container-low px-md py-sm text-body-sm text-on-surface font-mono"
+                          />
+                        </label>
+                        <label className="col-span-2 flex flex-col gap-xs">
+                          <span className="text-xs text-on-surface-variant font-semibold">Host</span>
+                          <input
+                            type="text"
+                            value={accountForm.smtpHost}
+                            onChange={(e) => setAccountForm({ ...accountForm, smtpHost: e.target.value })}
+                            placeholder="smtp.zoho.in"
+                            className="rounded-lg border border-outline bg-surface-container-low px-md py-sm text-body-sm text-on-surface font-mono"
+                          />
+                        </label>
+                        <label className="flex flex-col gap-xs">
+                          <span className="text-xs text-on-surface-variant font-semibold">Port</span>
+                          <input
+                            type="number"
+                            value={accountForm.smtpPort}
+                            onChange={(e) => setAccountForm({ ...accountForm, smtpPort: Number(e.target.value) || 465 })}
+                            className="rounded-lg border border-outline bg-surface-container-low px-md py-sm text-body-sm text-on-surface font-mono"
+                          />
+                        </label>
+                        <label className="flex flex-col gap-xs">
+                          <span className="text-xs text-on-surface-variant font-semibold">User (from-address)</span>
+                          <input
+                            type="text"
+                            value={accountForm.smtpUser}
+                            onChange={(e) => setAccountForm({ ...accountForm, smtpUser: e.target.value })}
+                            placeholder="hello@yourcompany.com"
+                            className="rounded-lg border border-outline bg-surface-container-low px-md py-sm text-body-sm text-on-surface font-mono"
+                          />
+                        </label>
+                        <label className="col-span-2 flex flex-col gap-xs">
+                          <span className="text-xs text-on-surface-variant font-semibold">Password</span>
+                          <input
+                            type="password"
+                            value={accountForm.smtpPassword}
+                            onChange={(e) => setAccountForm({ ...accountForm, smtpPassword: e.target.value })}
+                            placeholder={editingAccountId !== null ? "•••••••• (leave blank to keep current)" : "required"}
+                            className="rounded-lg border border-outline bg-surface-container-low px-md py-sm text-body-sm text-on-surface font-mono"
+                          />
+                        </label>
+                      </div>
+                    </div>
+
+                    <div className="space-y-sm pt-sm border-t border-outline/50">
+                      <span className="text-[10px] font-bold text-on-surface-variant uppercase tracking-wider">Send Limits</span>
+                      <p className="text-xs text-on-surface-variant">
+                        Zoho&apos;s external sending is reputation-based, dynamically capped at 50-500/hr — going above 50 without an established sending history risks another block; 500 is Zoho&apos;s documented absolute ceiling.
+                      </p>
+                      <div className="grid grid-cols-2 gap-sm">
+                        <label className="flex flex-col gap-xs">
+                          <span className="text-xs text-on-surface-variant font-semibold">Hourly cap</span>
+                          <input
+                            type="number"
+                            value={accountForm.hourlyCap}
+                            onChange={(e) => setAccountForm({ ...accountForm, hourlyCap: Number(e.target.value) || 1 })}
+                            className="rounded-lg border border-outline bg-surface-container-low px-md py-sm text-body-sm text-on-surface font-mono"
+                          />
+                        </label>
+                        <label className="flex flex-col gap-xs">
+                          <span className="text-xs text-on-surface-variant font-semibold">Daily cap</span>
+                          <input
+                            type="number"
+                            value={accountForm.dailyCap}
+                            onChange={(e) => setAccountForm({ ...accountForm, dailyCap: Number(e.target.value) || 1 })}
+                            className="rounded-lg border border-outline bg-surface-container-low px-md py-sm text-body-sm text-on-surface font-mono"
+                          />
+                        </label>
+                      </div>
+                      {accountForm.hourlyCap > 50 && (
+                        <p className="text-xs text-amber-300 font-semibold">Above Zoho&apos;s 50/hr reputation-based low end — safe for an established account, risky otherwise.</p>
+                      )}
+                    </div>
+
+                    <div className="space-y-sm pt-sm border-t border-outline/50">
+                      <span className="text-[10px] font-bold text-on-surface-variant uppercase tracking-wider">Warm-up</span>
+                      <p className="text-xs text-on-surface-variant">
+                        Following Zoho&apos;s own guidance to ramp volume up gradually: when enabled, actual sending starts well below the caps above and increases to them over ~14 days, rather than sending at full volume from day one.
+                      </p>
+                      <label className="flex items-center gap-sm">
+                        <input
+                          type="checkbox"
+                          checked={accountForm.warmupEnabled}
+                          onChange={(e) => setAccountForm({ ...accountForm, warmupEnabled: e.target.checked })}
+                          className="h-4 w-4"
+                        />
+                        <span className="text-body-sm text-on-surface">Warm-up enabled</span>
+                      </label>
+                    </div>
+
+                    <div className="flex justify-end gap-sm pt-sm">
+                      <button
+                        onClick={() => setModalView("list")}
+                        className="rounded-lg border border-outline bg-surface-container-low px-md py-sm text-label-md font-bold text-on-surface-variant transition-colors hover:text-on-surface cursor-pointer"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        onClick={saveAccount}
+                        disabled={isSavingAccount}
+                        className="rounded-lg bg-primary px-md py-sm text-label-md font-extrabold text-on-primary shadow-sm transition-transform hover:scale-[1.02] active:scale-95 cursor-pointer disabled:opacity-50"
+                      >
+                        {isSavingAccount ? "Saving..." : "Save"}
+                      </button>
+                    </div>
                   </div>
-                  {settingsForm.hourlyCap > 50 && (
-                    <p className="text-xs text-amber-300 font-semibold">Above Zoho&apos;s 50/hr reputation-based low end — safe for an established account, risky otherwise.</p>
-                  )}
-                </div>
-
-                <div className="space-y-sm pt-sm border-t border-outline/50">
-                  <span className="text-[10px] font-bold text-on-surface-variant uppercase tracking-wider">Warm-up</span>
-                  <p className="text-xs text-on-surface-variant">
-                    Following Zoho&apos;s own guidance to ramp volume up gradually: when enabled, actual sending starts well below your caps above and increases to them over ~14 days, rather than sending at full volume from day one.
-                  </p>
-                  <label className="flex items-center gap-sm">
-                    <input
-                      type="checkbox"
-                      checked={settingsForm.warmupEnabled}
-                      onChange={(e) => setSettingsForm({ ...settingsForm, warmupEnabled: e.target.checked })}
-                      className="h-4 w-4"
-                    />
-                    <span className="text-body-sm text-on-surface">Warm-up enabled</span>
-                  </label>
-                  {settingsView?.effective.warmupActive && (
-                    <p className="text-xs font-mono text-primary font-semibold">
-                      Currently: {settingsView.effective.hourlyCap}/{settingsView.effective.hourlyTarget} per hour (day {settingsView.effective.warmupDay} of {settingsView.effective.warmupDays})
-                    </p>
-                  )}
-                  <button
-                    onClick={handleResetWarmup}
-                    disabled={isResettingWarmup || !settingsView?.configured}
-                    className="rounded-lg border border-outline bg-surface-container-low px-md py-sm text-xs font-bold text-on-surface transition-colors hover:bg-surface-container cursor-pointer disabled:opacity-50"
-                  >
-                    {isResettingWarmup ? "Resetting..." : "Reset warm-up (restart ramp from the floor)"}
-                  </button>
-                </div>
-
-                <div className="flex justify-end gap-sm pt-sm">
-                  <button
-                    onClick={() => setSettingsOpen(false)}
-                    className="rounded-lg border border-outline bg-surface-container-low px-md py-sm text-label-md font-bold text-on-surface-variant transition-colors hover:text-on-surface cursor-pointer"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    onClick={saveSettings}
-                    disabled={isSavingSettings}
-                    className="rounded-lg bg-primary px-md py-sm text-label-md font-extrabold text-on-primary shadow-sm transition-transform hover:scale-[1.02] active:scale-95 cursor-pointer disabled:opacity-50"
-                  >
-                    {isSavingSettings ? "Saving..." : "Save"}
-                  </button>
-                </div>
+                )}
               </div>
             </div>
           )}

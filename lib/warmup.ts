@@ -1,5 +1,5 @@
 // Pure math for the send-cap warm-up ramp — no DB access, safe to import
-// from both server code (lib/sender-settings.ts) and tests. Follows Zoho's
+// from both server code (lib/sender-accounts.ts) and tests. Follows Zoho's
 // own documented guidance (ramp volume up gradually rather than jumping to
 // a flat cap) after the account got blocked for bursty test sending — see
 // https://www.zoho.com/mail/help/adminconsole/rates-and-limits.html.

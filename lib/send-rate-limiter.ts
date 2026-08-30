@@ -1,5 +1,5 @@
-import { sql } from "./db.ts";
-import { getEffectiveRateLimitConfig } from "./sender-settings.ts";
+import { sql, sqlTransaction } from "./db.ts";
+import { getEffectiveRateLimitConfig, listAccounts, type SenderAccount } from "./sender-accounts.ts";
 
 export interface RateLimitConfig {
   hourlyCap: number;
@@ -17,11 +17,10 @@ export interface RateLimitStatus {
   hourly: WindowStatus;
   daily: WindowStatus;
   retryAfterSeconds: number; // 0 when allowed
-  // Only populated by peekRateLimitStatus/reserveSendSlot (not by the pure
-  // computeRateLimitStatus below) — which of "immediate" (Send now) vs
-  // "campaign" (background campaigns) is actually consuming the trailing-hour
-  // window right now, so a stall caused by one competing with the other is
-  // visible instead of requiring a manual DB query to explain.
+  // Only populated by peek/reserve helpers below (not by the pure
+  // computeRateLimitStatus) — which of "immediate" (legacy) vs "campaign"
+  // (background campaigns) is actually consuming the trailing-hour window
+  // right now, so a stall is diagnosable from the UI without a DB query.
   hourlySourceBreakdown?: Record<string, number>;
 }
 
@@ -130,26 +129,18 @@ export function formatRetryAfter(seconds: number): string {
   return remainingMinutes > 0 ? `${hours}h ${remainingMinutes}m` : `${hours}h`;
 }
 
-// Sourced from the Settings-UI-configured caps (lib/sender-settings.ts),
-// with the warm-up ramp already applied — everything downstream (the rate
-// limiter, campaign duration validation) automatically respects it with no
-// further changes needed.
-export async function getRateLimitConfig(): Promise<RateLimitConfig> {
-  const effective = await getEffectiveRateLimitConfig();
-  return { hourlyCap: effective.hourlyCap, dailyCap: effective.dailyCap };
-}
-
 interface AttemptRecord {
   ts: number;
   source: string;
 }
 
-async function readAttempts(now: number): Promise<AttemptRecord[]> {
+async function readAttempts(now: number, accountIds: number[]): Promise<AttemptRecord[]> {
+  if (accountIds.length === 0) return [];
   try {
     const rows = await sql`
       SELECT extract(epoch from sent_at) * 1000 AS ts, source
       FROM send_attempts
-      WHERE sent_at > to_timestamp(${(now - DAILY_MS) / 1000})
+      WHERE sent_at > to_timestamp(${(now - DAILY_MS) / 1000}) AND account_id = ANY(${accountIds}::int[])
     `;
     return rows.map((r) => ({ ts: Number(r.ts), source: (r.source as string) || "immediate" }));
   } catch (err) {
@@ -168,32 +159,123 @@ function computeHourlySourceBreakdown(attempts: AttemptRecord[], now: number): R
   return breakdown;
 }
 
-export async function peekRateLimitStatus(now = Date.now()): Promise<RateLimitStatus> {
-  const attempts = await readAttempts(now);
-  const config = await getRateLimitConfig();
+// One account's current status against its own (warm-up-adjusted) caps —
+// used by the cron tick to decide which accounts can currently send at all.
+export async function peekAccountRateLimitStatus(account: SenderAccount, now = Date.now()): Promise<RateLimitStatus> {
+  const attempts = await readAttempts(now, [account.id]);
+  const config = getEffectiveRateLimitConfig(account);
   const status = computeRateLimitStatus(attempts.map((a) => a.ts), config, now);
   return { ...status, hourlySourceBreakdown: computeHourlySourceBreakdown(attempts, now) };
 }
 
-// source distinguishes "Send now" (immediate) from background-campaign cron
-// ticks (campaign) — both draw from the same shared cap, so tagging where
-// each reservation came from is what makes a stall caused by one competing
-// with the other diagnosable from the UI instead of a manual DB query.
-export async function reserveSendSlot(source: "immediate" | "campaign", now = Date.now()): Promise<RateLimitStatus> {
-  const attempts = await readAttempts(now);
-  const config = await getRateLimitConfig();
+// Reserves one send slot against a specific account's shared cap — the live
+// DB check here (not the cron tick's in-memory snapshot) is the sole
+// authority on whether a send is actually allowed.
+//
+// Concurrent callers for the SAME account (two due emails both assigned to
+// it within one tick, or two overlapping tick invocations) must not both
+// squeeze through when only one slot remains — a plain read-then-insert
+// has a TOCTOU race: both could read "1 remaining" before either commits.
+// pg_advisory_xact_lock(account.id) closes that: the lock-acquire ->
+// recompute -> conditional-insert sequence below runs as one non-interactive
+// transaction (the Neon HTTP driver has no interactive/multi-round-trip
+// transactions, so this can't be split into separate awaited round trips —
+// everything that must share the lock has to be one sqlTransaction call), so
+// a second caller's lock acquisition blocks until the first's transaction —
+// insert included, if it made one — has committed and released the lock.
+export async function reserveSendSlot(
+  account: SenderAccount,
+  source: "immediate" | "campaign",
+  now = Date.now()
+): Promise<RateLimitStatus> {
+  const config = getEffectiveRateLimitConfig(account);
+
+  const [, insertedRows, attemptRows] = await sqlTransaction([
+    sql`SELECT pg_advisory_xact_lock(${account.id})`,
+    sql`
+      WITH counts AS (
+        SELECT
+          count(*) FILTER (WHERE sent_at > to_timestamp(${(now - HOURLY_MS) / 1000})) AS hourly_used,
+          count(*) FILTER (WHERE sent_at > to_timestamp(${(now - DAILY_MS) / 1000})) AS daily_used
+        FROM send_attempts
+        WHERE account_id = ${account.id}
+      )
+      INSERT INTO send_attempts (sent_at, source, account_id)
+      SELECT to_timestamp(${now / 1000}), ${source}, ${account.id}
+      FROM counts
+      -- Mirrors computeRateLimitStatus's allowed = !hourlyBlocked && !dailyBlocked
+      -- (hourlyBlocked = hourlyUsed >= hourlyCap) — keep these in sync.
+      WHERE counts.hourly_used < ${config.hourlyCap} AND counts.daily_used < ${config.dailyCap}
+      RETURNING 1
+    `,
+    sql`
+      SELECT extract(epoch from sent_at) * 1000 AS ts, source
+      FROM send_attempts
+      WHERE account_id = ${account.id} AND sent_at > to_timestamp(${(now - DAILY_MS) / 1000})
+    `,
+  ]);
+
+  const reserved = insertedRows.length > 0;
+  const attempts: AttemptRecord[] = attemptRows.map((r) => ({ ts: Number(r.ts), source: (r.source as string) || "immediate" }));
   const status = computeRateLimitStatus(attempts.map((a) => a.ts), config, now);
 
-  if (status.allowed) {
-    await sql`INSERT INTO send_attempts (sent_at, source) VALUES (to_timestamp(${now / 1000}), ${source})`;
-    const updatedAttempts = [...attempts, { ts: now, source }];
-    const postStatus = computeRateLimitStatus(updatedAttempts.map((a) => a.ts), config, now);
-    return {
-      ...postStatus,
-      allowed: true, // This specific reservation was permitted and granted.
-      hourlySourceBreakdown: computeHourlySourceBreakdown(updatedAttempts, now),
-    };
+  if (reserved) {
+    return { ...status, allowed: true, hourlySourceBreakdown: computeHourlySourceBreakdown(attempts, now) };
   }
-
   return { ...status, hourlySourceBreakdown: computeHourlySourceBreakdown(attempts, now) };
+}
+
+async function activeAccountsWithAggregateConfig(): Promise<{ accounts: SenderAccount[]; config: RateLimitConfig }> {
+  const accounts = (await listAccounts()).filter((a) => a.status === "active");
+  const config = accounts.reduce(
+    (sum, a) => {
+      const eff = getEffectiveRateLimitConfig(a);
+      return { hourlyCap: sum.hourlyCap + eff.hourlyCap, dailyCap: sum.dailyCap + eff.dailyCap };
+    },
+    { hourlyCap: 0, dailyCap: 0 }
+  );
+  return { accounts, config };
+}
+
+// Combined cap across every active account — used for campaign-duration
+// validation (lib/campaign-schedule.ts's computeMinDurationHours doesn't
+// care whose cap it's given, just the number).
+export async function getRateLimitConfig(): Promise<RateLimitConfig> {
+  return (await activeAccountsWithAggregateConfig()).config;
+}
+
+// Combined status across every active account — what the Send/History UI
+// displays. Not itself used to gate any individual send (each account's own
+// reserveSendSlot call is what actually enforces its cap).
+export async function peekRateLimitStatus(now = Date.now()): Promise<RateLimitStatus> {
+  const { accounts, config } = await activeAccountsWithAggregateConfig();
+  const attempts = await readAttempts(now, accounts.map((a) => a.id));
+  const status = computeRateLimitStatus(attempts.map((a) => a.ts), config, now);
+  return { ...status, hourlySourceBreakdown: computeHourlySourceBreakdown(attempts, now) };
+}
+
+export interface AccountLoad {
+  accountId: number;
+  hourlyUsed: number;
+  hourlyCap: number;
+  dailyUsed: number;
+  dailyCap: number;
+}
+
+// Picks whichever candidate is currently furthest from its own cap, by
+// fraction used rather than raw count — otherwise an account with a smaller
+// configured cap would always look "more loaded" than one with a bigger
+// cap purely because its numbers are smaller. Returns null for an empty list.
+export function pickLeastLoadedAccount(candidates: AccountLoad[]): number | null {
+  if (candidates.length === 0) return null;
+  let best = candidates[0];
+  let bestLoad = Math.max(best.hourlyUsed / best.hourlyCap, best.dailyUsed / best.dailyCap);
+  for (const c of candidates.slice(1)) {
+    const load = Math.max(c.hourlyUsed / c.hourlyCap, c.dailyUsed / c.dailyCap);
+    if (load < bestLoad) {
+      best = c;
+      bestLoad = load;
+    }
+  }
+  return best.accountId;
 }

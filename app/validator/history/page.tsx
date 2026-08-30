@@ -20,7 +20,6 @@ import { cn } from "@/lib/utils";
 
 const CAMPAIGN_STATUS_STYLES: Record<CampaignListView["status"], string> = {
   running: "bg-primary/10 text-primary border border-primary/20",
-  paused: "bg-amber-500/10 text-amber-400 border border-amber-500/20",
   completed: "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20",
   canceled: "bg-on-surface-variant/10 text-on-surface-variant border border-outline",
 };
@@ -176,7 +175,7 @@ export default function HistoryPage() {
                       >
                         View
                       </button>
-                      {(c.status === "running" || c.status === "paused") && (
+                      {c.status === "running" && (
                         <button
                           onClick={() => cancelCampaignFromHistory(c.id)}
                           className="rounded-lg border border-red-500/25 bg-red-500/10 px-sm py-xs text-xs font-bold text-red-300 transition-colors hover:bg-red-500/20 cursor-pointer"
