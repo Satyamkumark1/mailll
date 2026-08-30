@@ -3,7 +3,7 @@ import { computeScheduledTimes } from "./campaign-schedule.ts";
 import { buildEmailHtml, LOGO_CID } from "./email-signature.ts";
 import { MAX_CONSECUTIVE_SEND_FAILURES, type DraftResult, type OutreachConfig } from "./store.ts";
 
-export type CampaignStatus = "running" | "paused" | "completed" | "canceled";
+export type CampaignStatus = "running" | "completed" | "canceled";
 export type CampaignEmailStatus = "pending" | "sending" | "sent" | "failed" | "canceled" | "skipped";
 
 export type DeliveryStatus = "delivered" | "bounced" | null;
@@ -21,6 +21,10 @@ export interface CampaignEmailSummary {
   // either bounces it or enough time passes with no bounce to infer delivery.
   deliveryStatus: DeliveryStatus;
   bounceReason: string | null;
+  // Which sender account actually attempted this send — only set once the
+  // row is claimed and dispatched (accounts are picked dynamically at send
+  // time, not when the campaign is scheduled), so pending rows show null.
+  accountLabel: string | null;
 }
 
 export interface CampaignListItem {
@@ -112,10 +116,11 @@ export async function getCampaign(id: string): Promise<CampaignSummary | null> {
   if (!campaign) return null;
 
   const emails = await sql`
-    SELECT id, to_email, status, error, sent_at, scheduled_at, delivery_status, bounce_reason
-    FROM campaign_emails
-    WHERE campaign_id = ${id}
-    ORDER BY scheduled_at ASC
+    SELECT ce.id, ce.to_email, ce.status, ce.error, ce.sent_at, ce.scheduled_at, ce.delivery_status, ce.bounce_reason, sa.label AS account_label
+    FROM campaign_emails ce
+    LEFT JOIN sender_accounts sa ON sa.id = ce.account_id
+    WHERE ce.campaign_id = ${id}
+    ORDER BY ce.scheduled_at ASC
   `;
 
   return {
@@ -138,6 +143,7 @@ export async function getCampaign(id: string): Promise<CampaignSummary | null> {
       scheduledAt: e.scheduled_at as string,
       deliveryStatus: (e.delivery_status as DeliveryStatus) ?? null,
       bounceReason: (e.bounce_reason as string | null) ?? null,
+      accountLabel: (e.account_label as string | null) ?? null,
     })),
   };
 }
@@ -153,17 +159,7 @@ export async function cancelCampaign(id: string): Promise<void> {
   `;
 }
 
-// Un-pauses a campaign that stopped itself after too many consecutive
-// failures — the cron worker only claims rows from 'running' campaigns, so
-// this is what lets it pick the backlog back up.
-export async function resumeCampaign(id: string): Promise<void> {
-  await sql`
-    UPDATE campaigns SET status = 'running', consecutive_failures = 0
-    WHERE id = ${id} AND status = 'paused'
-  `;
-}
-
-// Distinct from resumeCampaign above: cancelCampaign() already flipped this
+// Distinct from account-level pause/resume (lib/sender-accounts.ts): cancelCampaign() already flipped this
 // campaign's un-sent rows to 'canceled' with stale (likely past) scheduled_at
 // times, so bringing it back needs a real reschedule — not just flipping the
 // campaign status bit — or the cron would immediately try to "catch up" on
@@ -201,7 +197,7 @@ export async function restartCampaign(id: string, durationHours: number): Promis
   `;
 }
 
-// Pulls specific still-pending rows out of a running/paused campaign without
+// Pulls specific still-pending rows out of a running campaign without
 // touching the rest — distinct from cancelCampaign (which takes out every
 // pending row) and tracked as its own status so these never get swept up by
 // restartCampaign (which only looks at 'canceled' rows).
@@ -236,6 +232,35 @@ export interface DueEmail {
   subject: string;
   body: string;
   html: string;
+}
+
+// One claimed email's dispatch outcome in a cron tick — see
+// app/api/cron/tick/route.ts's sendOne().
+export type DispatchOutcome = "sent" | "failed" | "deferred";
+
+export interface DispatchSummary {
+  sent: number;
+  failed: number;
+  deferred: number;
+  // A dispatch promise rejected outright — something threw before any of
+  // the above outcomes could be recorded (e.g. a transient DB error inside
+  // reserveSendSlot or recordEmailResult), as opposed to a normal
+  // rate-limit defer or a caught send failure. Counted separately so the
+  // tick's totals stay honest (sent+failed+deferred+errored should match
+  // how many rows were claimed) instead of silently dropping them.
+  errored: number;
+}
+
+// Pure — no DB access, so this is testable without a Postgres connection
+// unlike the rest of this file. The caller is still responsible for
+// recovering each rejected row (releaseEmail) — this only tallies.
+export function summarizeDispatchResults(results: PromiseSettledResult<DispatchOutcome>[]): DispatchSummary {
+  const summary: DispatchSummary = { sent: 0, failed: 0, deferred: 0, errored: 0 };
+  for (const r of results) {
+    if (r.status === "fulfilled") summary[r.value]++;
+    else summary.errored++;
+  }
+  return summary;
 }
 
 // Locks and returns up to `limit` due rows across all running campaigns so
@@ -281,26 +306,34 @@ export async function releaseEmail(id: string): Promise<void> {
   await sql`UPDATE campaign_emails SET status = 'pending' WHERE id = ${id} AND status = 'sending'`;
 }
 
+// Two consecutive failures on the same account means something about that
+// account is actually broken (bad creds, blocked domain) rather than
+// one-off bounces — pause it alone so the other accounts keep sending,
+// instead of burning through sends on a mailbox that's already failing.
+export function shouldPauseAccount(consecutiveFailures: number): boolean {
+  return consecutiveFailures >= MAX_CONSECUTIVE_SEND_FAILURES;
+}
+
 export async function recordEmailResult(
   id: string,
   campaignId: string,
+  accountId: number,
   result: { status: "sent"; } | { status: "failed"; error: string }
 ): Promise<void> {
   if (result.status === "sent") {
-    await sql`UPDATE campaign_emails SET status = 'sent', sent_at = now() WHERE id = ${id}`;
+    await sql`UPDATE campaign_emails SET status = 'sent', sent_at = now(), account_id = ${accountId} WHERE id = ${id}`;
     await sql`UPDATE campaigns SET sent_count = sent_count + 1, consecutive_failures = 0 WHERE id = ${campaignId}`;
+    await sql`UPDATE sender_accounts SET consecutive_failures = 0 WHERE id = ${accountId}`;
   } else {
-    await sql`UPDATE campaign_emails SET status = 'failed', error = ${result.error} WHERE id = ${id}`;
-    const [updated] = await sql`
-      UPDATE campaigns SET failed_count = failed_count + 1, consecutive_failures = consecutive_failures + 1
-      WHERE id = ${campaignId}
+    await sql`UPDATE campaign_emails SET status = 'failed', error = ${result.error}, account_id = ${accountId} WHERE id = ${id}`;
+    await sql`UPDATE campaigns SET failed_count = failed_count + 1, consecutive_failures = consecutive_failures + 1 WHERE id = ${campaignId}`;
+    const [account] = await sql`
+      UPDATE sender_accounts SET consecutive_failures = consecutive_failures + 1
+      WHERE id = ${accountId}
       RETURNING consecutive_failures
     `;
-    // Two failures in a row means something is actually broken (bad creds,
-    // blocked domain) rather than one-off bounces — stop and make a human
-    // look, instead of burning through the rest of the list.
-    if ((updated.consecutive_failures as number) >= MAX_CONSECUTIVE_SEND_FAILURES) {
-      await sql`UPDATE campaigns SET status = 'paused' WHERE id = ${campaignId} AND status = 'running'`;
+    if (account && shouldPauseAccount(account.consecutive_failures as number)) {
+      await sql`UPDATE sender_accounts SET status = 'paused' WHERE id = ${accountId}`;
     }
   }
 

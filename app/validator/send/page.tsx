@@ -8,7 +8,6 @@ import {
   cancelBackgroundCampaign,
   createBackgroundCampaign,
   getCampaignStatus,
-  resumeBackgroundCampaign,
   restartBackgroundCampaign,
   skipCampaignEmails,
   CAMPAIGN_ID_STORAGE_KEY,
@@ -48,7 +47,8 @@ function sentDetailSuffix(e: CampaignView["emails"][number]): string {
 }
 
 export default function SendPage() {
-  const { confirmAction, settingsView, openSettings } = useValidatorChrome();
+  const { confirmAction, accounts, openSettings } = useValidatorChrome();
+  const activeAccountCount = accounts?.filter((a) => a.status === "active").length ?? 0;
   const { results, drafts, outreachConfig, rateLimitStatus, activeCampaignId, setRateLimitStatus, setActiveCampaignId } =
     useValidatorStore();
 
@@ -199,17 +199,7 @@ export default function SendPage() {
     }
   }, [activeCampaignId, refreshCampaign, confirmAction]);
 
-  const resumeCampaignHandler = useCallback(async () => {
-    if (!activeCampaignId) return;
-    try {
-      await resumeBackgroundCampaign(activeCampaignId);
-      await refreshCampaign(activeCampaignId);
-    } catch (err) {
-      setCampaignError(err instanceof Error ? err.message : "Failed to resume campaign");
-    }
-  }, [activeCampaignId, refreshCampaign]);
-
-  // Distinct from resumeCampaignHandler above: a *canceled* campaign's
+  // A *canceled* campaign's
   // un-sent rows already got their status flipped to 'canceled' and their
   // old scheduled_at times are stale, so this needs a real reschedule
   // (server-side, see lib/campaigns.ts restartCampaign), not just flipping
@@ -260,13 +250,13 @@ export default function SendPage() {
   }, [setActiveCampaignId]);
 
   const renderSenderStatus = () => {
-    if (!settingsView) return null;
-    if (!settingsView.configured) {
+    if (!accounts) return null;
+    if (activeAccountCount === 0) {
       return (
         <div className="flex items-center justify-between gap-sm rounded-lg border border-amber-500/25 bg-amber-500/10 px-md py-sm text-body-sm text-amber-200">
           <span className="flex items-center gap-sm">
             <Icon name="lock" className="text-[18px]" />
-            No sender account configured yet.
+            No active sender account configured yet.
           </span>
           <button
             onClick={openSettings}
@@ -280,31 +270,28 @@ export default function SendPage() {
     return (
       <p className="flex flex-wrap items-center gap-x-sm gap-y-1 text-body-sm text-on-surface-variant font-semibold">
         <Icon name="lock" className="text-[20px] text-primary" />
-        Sending as <code className="font-mono text-xs bg-surface-container px-1.5 py-0.5 rounded font-bold break-all">{settingsView.smtpUser}</code>.{" "}
+        Sending from {activeAccountCount} of {accounts.length} account{accounts.length === 1 ? "" : "s"}.{" "}
         <button onClick={openSettings} className="text-primary font-bold hover:underline cursor-pointer">
-          Edit
+          Manage
         </button>
-      </p>
-    );
-  };
-
-  const renderWarmupNotice = () => {
-    if (!settingsView?.effective.warmupActive) return null;
-    return (
-      <p className="text-xs font-mono text-amber-300 font-medium">
-        Ramping up: {settingsView.effective.hourlyCap}/{settingsView.effective.hourlyTarget} per hour (day {settingsView.effective.warmupDay} of {settingsView.effective.warmupDays})
       </p>
     );
   };
 
   // Reads as a reassuring heads-up, not an error — a background campaign is
   // designed to queue and wait, so cap exhaustion here is expected.
+  const pausedAccountNote =
+    accounts && activeAccountCount > 0 && activeAccountCount < accounts.length
+      ? ` (${accounts.length - activeAccountCount} of ${accounts.length} account${accounts.length === 1 ? "" : "s"} paused — check Settings)`
+      : "";
+
   const renderRateLimitNotice = () => {
     if (!rateLimitStatus) return null;
     if (rateLimitStatus.allowed) {
       return (
         <p className="text-xs font-mono text-on-surface-variant font-medium">
           {rateLimitStatus.hourly.remaining} sends left this hour · {rateLimitStatus.daily.remaining} left today
+          {pausedAccountNote}
         </p>
       );
     }
@@ -360,13 +347,9 @@ export default function SendPage() {
       {campaign && (
         <div className="rounded-xl border border-primary/30 bg-primary/5 p-lg shadow-sm space-y-md">
           <div className="flex items-center justify-between">
-            <p className={cn("flex items-center gap-sm text-body-sm font-bold", campaign.status === "paused" ? "text-amber-400" : "text-primary")}>
-              <Icon name={campaign.status === "paused" ? "pause_circle" : "cloud_sync"} className="text-[20px]" />
-              {campaign.status === "running"
-                ? "Background campaign running on the server"
-                : campaign.status === "paused"
-                ? `Paused — ${campaign.consecutiveFailures} failed in a row`
-                : `Background campaign ${campaign.status}`}
+            <p className="flex items-center gap-sm text-body-sm font-bold text-primary">
+              <Icon name="cloud_sync" className="text-[20px]" />
+              {campaign.status === "running" ? "Background campaign running on the server" : `Background campaign ${campaign.status}`}
             </p>
             {(campaign.status === "completed" || campaign.status === "canceled") && (
               <button onClick={dismissCampaign} className="text-xs font-bold text-on-surface-variant hover:text-on-surface cursor-pointer">
@@ -377,8 +360,6 @@ export default function SendPage() {
           <p className="text-xs text-on-surface-variant">
             {campaign.status === "running"
               ? "You can close this tab — sending continues on the server until the window ends."
-              : campaign.status === "paused"
-              ? "The engine stopped itself after 2 consecutive failed sends — check the log below for why, fix the issue, then resume."
               : `Finished ${new Date(campaign.windowEnd).toLocaleString()}.`}
           </p>
           <p className="text-xs font-mono text-on-surface-variant/80">
@@ -409,17 +390,8 @@ export default function SendPage() {
             </div>
           </div>
           {(campaign.status === "running" ||
-            campaign.status === "paused" ||
             (campaign.status === "canceled" && campaign.emails.some((e) => e.status === "canceled"))) && (
             <div className="flex gap-sm">
-              {campaign.status === "paused" && (
-                <button
-                  onClick={resumeCampaignHandler}
-                  className="rounded-lg bg-primary px-md py-sm text-label-md font-extrabold text-on-primary shadow-sm transition-opacity hover:opacity-95 cursor-pointer"
-                >
-                  Resume campaign
-                </button>
-              )}
               {campaign.status === "canceled" && (
                 <button
                   onClick={restartCampaignHandler}
@@ -428,7 +400,7 @@ export default function SendPage() {
                   Resume campaign
                 </button>
               )}
-              {(campaign.status === "running" || campaign.status === "paused") && (
+              {campaign.status === "running" && (
                 <button
                   onClick={cancelCampaign}
                   className="rounded-lg border border-outline bg-surface-container-low px-md py-sm text-label-md font-bold text-on-surface transition-colors hover:bg-surface-container cursor-pointer"
@@ -474,6 +446,7 @@ export default function SendPage() {
                       <th className="w-10 px-md py-sm"></th>
                       <th className="px-md py-sm text-[10px] font-bold uppercase tracking-wider text-on-surface-variant">Email Address</th>
                       <th className="px-md py-sm text-[10px] font-bold uppercase tracking-wider text-on-surface-variant">Status</th>
+                      <th className="px-md py-sm text-[10px] font-bold uppercase tracking-wider text-on-surface-variant">Account</th>
                       <th className="px-md py-sm text-[10px] font-bold uppercase tracking-wider text-on-surface-variant">Scheduled</th>
                       <th className="px-md py-sm text-[10px] font-bold uppercase tracking-wider text-on-surface-variant">Detail</th>
                     </tr>
@@ -507,6 +480,7 @@ export default function SendPage() {
                               {display.label}
                             </span>
                           </td>
+                          <td className="px-md py-sm font-mono text-[11px] text-on-surface-variant">{e.accountLabel ?? "—"}</td>
                           <td className="px-md py-sm font-mono text-[11px] text-on-surface-variant">
                             {new Date(e.scheduledAt).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}
                           </td>
@@ -685,12 +659,11 @@ export default function SendPage() {
           <p className="mt-sm text-xs text-on-surface-variant font-medium">
             A small batch defaults to a quick, human-paced send rather than being stretched out — the minimum above already keeps a safe gap between sends. Sends are spaced evenly across whatever window you pick; if the hourly/daily cap is hit, remaining emails wait for the next opening rather than being dropped.
           </p>
-          {renderWarmupNotice()}
         </div>
         {renderRateLimitNotice()}
         <button
           onClick={scheduleCampaign}
-          disabled={isSchedulingCampaign || includedDrafts.length === 0 || draftsStale || startAtMissing || (campaign?.status === "running" || campaign?.status === "paused") || !settingsView?.configured}
+          disabled={isSchedulingCampaign || includedDrafts.length === 0 || draftsStale || startAtMissing || campaign?.status === "running" || activeAccountCount === 0}
           className="flex items-center gap-sm rounded-lg bg-primary px-lg py-md text-label-md font-extrabold text-on-primary shadow-lg shadow-primary/20 transition-all hover:scale-[1.02] active:scale-95 disabled:opacity-50 cursor-pointer"
         >
           <Icon name="schedule_send" className="text-[18px]" />

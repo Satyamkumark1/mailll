@@ -20,3 +20,13 @@ function getClient(): NeonQueryFunction<false, false> {
 export function sql(strings: TemplateStringsArray, ...values: unknown[]) {
   return getClient()(strings, ...values);
 }
+
+// Runs multiple `sql`-built queries as one non-interactive Postgres
+// transaction (the Neon HTTP driver has no interactive/multi-round-trip
+// transactions, so all statements must be built up front — no branching in
+// JS between them). Build each entry with `sql` without awaiting it. Used
+// where a read-then-write needs to be atomic — see
+// lib/send-rate-limiter.ts's reserveSendSlot.
+export function sqlTransaction(queries: ReturnType<typeof sql>[]) {
+  return getClient().transaction(queries);
+}

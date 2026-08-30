@@ -16,6 +16,7 @@ export interface CampaignEmailView {
   scheduledAt: string;
   deliveryStatus: DeliveryStatus;
   bounceReason: string | null;
+  accountLabel: string | null;
 }
 
 export interface CampaignListView {
@@ -77,16 +78,8 @@ export async function cancelBackgroundCampaign(id: string): Promise<void> {
   }
 }
 
-export async function resumeBackgroundCampaign(id: string): Promise<void> {
-  const res = await fetch(`/api/campaigns/${id}/resume`, { method: "POST" });
-  if (!res.ok) {
-    throw new Error(`Failed to resume campaign (HTTP ${res.status})`);
-  }
-}
-
 // For a *canceled* campaign — reschedules its un-sent emails over a fresh
-// window starting now, rather than just flipping the status bit back (see
-// resumeBackgroundCampaign above, which is for the auto-paused case instead).
+// window starting now, rather than just flipping the status bit back.
 export async function restartBackgroundCampaign(id: string, durationHours: number): Promise<void> {
   const res = await fetch(`/api/campaigns/${id}/restart`, {
     method: "POST",

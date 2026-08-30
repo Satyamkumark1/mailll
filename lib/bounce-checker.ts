@@ -1,7 +1,7 @@
 import { ImapFlow } from "imapflow";
 import { simpleParser } from "mailparser";
 import { sql } from "./db.ts";
-import { getDecryptedSmtpPassword, getSenderSettings, type SenderSettings } from "./sender-settings.ts";
+import { getDecryptedSmtpPassword, listAccounts, type SenderAccount } from "./sender-accounts.ts";
 
 // Check IMAP every 1 minute when sent emails are pending delivery confirmation
 // so bounce-back DSN notifications are detected promptly during active sends.
@@ -73,12 +73,12 @@ async function markInferredDelivered(): Promise<void> {
   `;
 }
 
-async function pollInbox(settings: SenderSettings, lastCheckedAt: string | null, lastUidRaw: unknown, uidValidityRaw: unknown): Promise<void> {
+async function pollInbox(account: SenderAccount): Promise<void> {
   const client = new ImapFlow({
-    host: deriveImapHost(settings.smtpHost),
+    host: deriveImapHost(account.smtpHost),
     port: 993,
     secure: true,
-    auth: { user: settings.smtpUser, pass: getDecryptedSmtpPassword(settings) },
+    auth: { user: account.smtpUser, pass: getDecryptedSmtpPassword(account) },
     logger: false,
   });
 
@@ -90,12 +90,12 @@ async function pollInbox(settings: SenderSettings, lastCheckedAt: string | null,
       if (!mailbox) return;
       const uidValidity = Number(mailbox.uidValidity);
 
-      let lastUid = Number(lastUidRaw ?? 0);
-      const knownUidValidity = Number(uidValidityRaw ?? 0);
+      let lastUid = account.bounceLastUid;
+      const knownUidValidity = account.bounceUidvalidity;
 
       // On initial setup or UIDVALIDITY reset, start checking from recent messages
       // (last 20) instead of skipping existing messages entirely.
-      if (!lastCheckedAt || knownUidValidity !== uidValidity) {
+      if (!account.lastBounceCheckAt || knownUidValidity !== uidValidity) {
         lastUid = Math.max(0, mailbox.uidNext - 20);
       }
 
@@ -112,9 +112,9 @@ async function pollInbox(settings: SenderSettings, lastCheckedAt: string | null,
       }
 
       await sql`
-        UPDATE sender_settings
+        UPDATE sender_accounts
         SET bounce_last_uid = ${maxSeenUid}, bounce_uidvalidity = ${uidValidity}, last_bounce_check_at = now()
-        WHERE id = 1
+        WHERE id = ${account.id}
       `;
     } finally {
       lock.release();
@@ -124,38 +124,39 @@ async function pollInbox(settings: SenderSettings, lastCheckedAt: string | null,
   }
 }
 
-// Polls the sending mailbox over IMAP for bounce-back (DSN) notifications and
-// reconciles them against 'sent' campaign_emails rows — SMTP accepting a
-// message (all `status = 'sent'` means) isn't the same as the recipient's
-// server actually keeping it. Bounces show up later, asynchronously, as a
-// separate email in this same inbox. Throttled and fully best-effort: any
-// failure here (bad/missing IMAP access, network, parsing) must never break
-// the send cron tick that calls this alongside the real send work.
-export async function checkBounces(): Promise<void> {
+async function checkBouncesForAccount(account: SenderAccount): Promise<void> {
   try {
-    const settings = await getSenderSettings();
-    if (!settings) return;
-
-    const [state] = await sql`
-      SELECT last_bounce_check_at, bounce_last_uid, bounce_uidvalidity FROM sender_settings WHERE id = 1
-    `;
-    const lastCheckedAt = (state?.last_bounce_check_at as string | null) ?? null;
-    if (lastCheckedAt && Date.now() - new Date(lastCheckedAt).getTime() < CHECK_INTERVAL_MS) return;
+    if (account.lastBounceCheckAt && Date.now() - new Date(account.lastBounceCheckAt).getTime() < CHECK_INTERVAL_MS) return;
 
     const [{ n: pendingConfirmation }] = await sql`
-      SELECT count(*)::int AS n FROM campaign_emails WHERE status = 'sent' AND delivery_status IS NULL
+      SELECT count(*)::int AS n FROM campaign_emails WHERE status = 'sent' AND delivery_status IS NULL AND account_id = ${account.id}
     `;
-    // Nothing to confirm and the UID baseline is already established — skip
-    // the IMAP round trip entirely. The baseline pointer only moves forward
-    // while we're actually polling, so once a new campaign does send
-    // something, the next check just scans a slightly bigger (still cheap)
-    // backlog rather than losing track of anything.
-    if ((pendingConfirmation as number) === 0 && lastCheckedAt) return;
+    // Nothing to confirm and the UID baseline is already established for
+    // this account — skip the IMAP round trip entirely. The baseline
+    // pointer only moves forward while actually polling, so once this
+    // account sends something new, the next check just scans a slightly
+    // bigger (still cheap) backlog rather than losing track of anything.
+    if ((pendingConfirmation as number) === 0 && account.lastBounceCheckAt) return;
 
-    await pollInbox(settings, lastCheckedAt, state?.bounce_last_uid, state?.bounce_uidvalidity);
+    await pollInbox(account);
   } catch (err) {
-    // Best-effort — IMAP misconfiguration must never take down the send cron.
-    console.error("IMAP bounce check failed:", err instanceof Error ? err.message : err);
+    // Best-effort — IMAP misconfiguration on one account must never take
+    // down bounce checking for the others, or the send cron itself.
+    console.error(`IMAP bounce check failed for account ${account.id}:`, err instanceof Error ? err.message : err);
+  }
+}
+
+// Polls every account's sending mailbox over IMAP for bounce-back (DSN)
+// notifications and reconciles them against 'sent' campaign_emails rows —
+// SMTP accepting a message (all `status = 'sent'` means) isn't the same as
+// the recipient's server actually keeping it. Bounces show up later,
+// asynchronously, as a separate email in that same inbox. Fully best-effort:
+// a failure on any one account must never break the send cron tick that
+// calls this alongside the real send work, nor delay the other accounts.
+export async function checkBounces(): Promise<void> {
+  try {
+    const accounts = await listAccounts();
+    await Promise.allSettled(accounts.map(checkBouncesForAccount));
   } finally {
     await markInferredDelivered().catch(() => {});
   }

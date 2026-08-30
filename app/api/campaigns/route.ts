@@ -1,7 +1,7 @@
 import { computeMinDurationHours, formatDurationHours } from "@/lib/campaign-schedule";
 import { createCampaign, listCampaigns } from "@/lib/campaigns";
 import { getRateLimitConfig } from "@/lib/send-rate-limiter";
-import { getSenderSettings } from "@/lib/sender-settings";
+import { listAccounts } from "@/lib/sender-accounts";
 import type { DraftResult, OutreachConfig } from "@/lib/store";
 
 export const runtime = "nodejs";
@@ -19,9 +19,9 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
-  const settings = await getSenderSettings();
-  if (!settings) {
-    return Response.json({ error: "No sender account configured yet — set one up in Settings." }, { status: 500 });
+  const accounts = await listAccounts();
+  if (!accounts.some((a) => a.status === "active")) {
+    return Response.json({ error: "No active sender account configured yet — set one up in Settings." }, { status: 500 });
   }
 
   const { drafts, config, durationHours, startAt } = (await request.json()) as CreateCampaignBody;

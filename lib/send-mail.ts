@@ -1,7 +1,7 @@
 import nodemailer from "nodemailer";
 import path from "node:path";
 import { LOGO_CID } from "./email-signature.ts";
-import { getDecryptedSmtpPassword, getSenderSettings } from "./sender-settings.ts";
+import { getDecryptedSmtpPassword, type SenderAccount } from "./sender-accounts.ts";
 import { ELEVIQUE_OUTREACH_CONFIG } from "./store.ts";
 
 export interface SendMailInput {
@@ -11,22 +11,17 @@ export interface SendMailInput {
   html?: string;
 }
 
-// No module-level cache: sender settings can change at runtime via the
-// Settings UI, and building a nodemailer transporter is a cheap local
-// operation — the real cost is the SMTP round trip inside sendMail below,
-// so there's no benefit to caching across requests here.
-async function getTransporter(): Promise<{ transporter: nodemailer.Transporter; user: string }> {
-  const settings = await getSenderSettings();
-  if (!settings) {
-    throw new Error("No sender account configured yet — set one up in Settings.");
-  }
-  const transporter = nodemailer.createTransport({
-    host: settings.smtpHost,
-    port: settings.smtpPort,
+// No caching: an account's credentials can change at runtime via Settings,
+// and building a nodemailer transporter is a cheap local operation — the
+// real cost is the SMTP round trip inside sendMailDirect below. Building N
+// of these concurrently for N accounts is equally cheap.
+function getTransporter(account: SenderAccount): nodemailer.Transporter {
+  return nodemailer.createTransport({
+    host: account.smtpHost,
+    port: account.smtpPort,
     secure: true, // port 465 = SSL
-    auth: { user: settings.smtpUser, pass: getDecryptedSmtpPassword(settings) },
+    auth: { user: account.smtpUser, pass: getDecryptedSmtpPassword(account) },
   });
-  return { transporter, user: settings.smtpUser };
 }
 
 // nodemailer attaches these to thrown Errors at runtime (SMTP rejection
@@ -53,14 +48,16 @@ function describeSendError(err: unknown): string {
   return parts.join(" — ");
 }
 
-// Shared by the immediate-send route and the background campaign cron
-// worker so SMTP/transport behavior only lives in one place.
-export async function sendMailDirect({ to, subject, text, html }: SendMailInput): Promise<void> {
-  const { transporter, user } = await getTransporter();
+// Shared by the background campaign cron worker so SMTP/transport behavior
+// only lives in one place. Every account sends under the same brand display
+// name (uniform sender identity across the account pool) — only the address
+// varies, via `account`.
+export async function sendMailDirect(account: SenderAccount, { to, subject, text, html }: SendMailInput): Promise<void> {
+  const transporter = getTransporter(account);
 
   try {
     await transporter.sendMail({
-      from: `"${ELEVIQUE_OUTREACH_CONFIG.senderName}" <${user}>`,
+      from: `"${ELEVIQUE_OUTREACH_CONFIG.senderName}" <${account.smtpUser}>`,
       to,
       subject,
       text,
