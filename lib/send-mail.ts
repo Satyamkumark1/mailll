@@ -23,7 +23,7 @@ function getTransporter(account: SenderAccount): nodemailer.Transporter {
   return nodemailer.createTransport({
     host: account.smtpHost,
     port: account.smtpPort,
-    secure: true, // port 465 = SSL
+    secure: account.smtpPort === 465, // 465 = SSL; 587 negotiates STARTTLS
     auth: { user: account.smtpUser, pass: getDecryptedSmtpPassword(account) },
   });
 }
