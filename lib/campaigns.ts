@@ -2,6 +2,7 @@ import { sql } from "./db.ts";
 import { computeScheduledTimes } from "./campaign-schedule.ts";
 import { buildEmailHtml, LOGO_CID } from "./email-signature.ts";
 import { MAX_CONSECUTIVE_SEND_FAILURES, type DraftResult, type OutreachConfig } from "./store.ts";
+import { notifySendStarted, notifyAccountPaused } from "./push-notifier.ts";
 
 export type CampaignStatus = "running" | "completed" | "canceled";
 export type CampaignEmailStatus = "pending" | "sending" | "sent" | "failed" | "canceled" | "skipped";
@@ -322,8 +323,18 @@ export async function recordEmailResult(
 ): Promise<void> {
   if (result.status === "sent") {
     await sql`UPDATE campaign_emails SET status = 'sent', sent_at = now(), account_id = ${accountId} WHERE id = ${id}`;
-    await sql`UPDATE campaigns SET sent_count = sent_count + 1, consecutive_failures = 0 WHERE id = ${campaignId}`;
+    const [campaign] = await sql`
+      UPDATE campaigns SET sent_count = sent_count + 1, consecutive_failures = 0
+      WHERE id = ${campaignId}
+      RETURNING sent_count
+    `;
     await sql`UPDATE sender_accounts SET consecutive_failures = 0 WHERE id = ${accountId}`;
+    // Postgres serializes concurrent updates to the same row, so exactly one
+    // caller ever observes sent_count transition to 1 — that's this
+    // campaign's first successful send, worth a "sending started" push.
+    if (campaign && (campaign.sent_count as number) === 1) {
+      await notifySendStarted().catch((err) => console.error("notifySendStarted failed:", err));
+    }
   } else {
     await sql`UPDATE campaign_emails SET status = 'failed', error = ${result.error}, account_id = ${accountId} WHERE id = ${id}`;
     await sql`UPDATE campaigns SET failed_count = failed_count + 1, consecutive_failures = consecutive_failures + 1 WHERE id = ${campaignId}`;
@@ -333,7 +344,17 @@ export async function recordEmailResult(
       RETURNING consecutive_failures
     `;
     if (account && shouldPauseAccount(account.consecutive_failures as number)) {
-      await sql`UPDATE sender_accounts SET status = 'paused' WHERE id = ${accountId}`;
+      const [paused] = await sql`
+        UPDATE sender_accounts
+        SET status = 'paused'
+        WHERE id = ${accountId} AND status = 'active'
+        RETURNING label, smtp_user
+        RETURNING label, smtp_user
+      `;
+      if (paused) {
+        const label = (paused.label as string | null) || (paused.smtp_user as string);
+        await notifyAccountPaused(label).catch((err) => console.error("notifyAccountPaused failed:", err));
+      }
     }
   }
 
