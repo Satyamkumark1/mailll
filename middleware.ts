@@ -14,10 +14,13 @@ export async function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
-  // 2. Allow public auth API routes and cron webhook
+  // 2. Allow public auth API routes, the cron webhook, and the tracking
+  // pixel/click-redirect/unsubscribe routes — those are hit directly by a
+  // recipient's mail client, which has no session cookie.
   if (
     pathname.startsWith("/api/auth/") ||
-    pathname === "/api/cron/tick"
+    pathname === "/api/cron/tick" ||
+    pathname.startsWith("/api/t/")
   ) {
     return NextResponse.next();
   }

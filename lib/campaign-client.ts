@@ -1,5 +1,5 @@
 import type { DraftResult, OutreachConfig } from "./store";
-import type { CampaignEmailStatus, CampaignStatus, DeliveryStatus } from "./campaigns";
+import type { BounceType, CampaignEmailStatus, CampaignStatus, DeliveryStatus } from "./campaigns";
 
 // Shared between the Send and History pages: Send rehydrates/tracks the
 // single "active" campaign id under this key, History writes it before
@@ -16,6 +16,12 @@ export interface CampaignEmailView {
   scheduledAt: string;
   deliveryStatus: DeliveryStatus;
   bounceReason: string | null;
+  bounceType: BounceType;
+  openedAt: string | null;
+  openCount: number;
+  clickedAt: string | null;
+  clickCount: number;
+  unsubscribedAt: string | null;
   accountLabel: string | null;
 }
 
@@ -41,7 +47,7 @@ export async function createBackgroundCampaign(
   config: OutreachConfig,
   durationHours: number,
   startAt?: string
-): Promise<{ id: string }> {
+): Promise<{ id: string; excludedCount: number }> {
   const res = await fetch("/api/campaigns", {
     method: "POST",
     headers: { "Content-Type": "application/json" },

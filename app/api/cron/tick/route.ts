@@ -50,7 +50,7 @@ async function sendOne(email: DueEmail, account: SenderAccount): Promise<Dispatc
   }
 
   try {
-    await sendMailDirect(account, { to: email.toEmail, subject: email.subject, text: email.body, html: email.html });
+    await sendMailDirect(account, { to: email.toEmail, subject: email.subject, text: email.body, html: email.html, emailId: email.id });
     await recordEmailResult(email.id, email.campaignId, account.id, { status: "sent" });
     return "sent";
   } catch (err) {
