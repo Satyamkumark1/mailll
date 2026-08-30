@@ -15,6 +15,7 @@ import {
   updateAccountView,
   type AccountView,
 } from "@/lib/accounts-client";
+import { disablePushNotifications, enablePushNotifications, getPushSubscriptionState, type PushSupport } from "@/lib/push-client";
 import { useValidatorStore, type Tab } from "@/lib/store";
 import { TABS } from "@/lib/tabs";
 import { cn, computeDraftsStale } from "@/lib/utils";
@@ -169,6 +170,31 @@ export default function ValidatorLayout({ children }: { children: React.ReactNod
   useEffect(() => {
     refreshAccounts();
   }, [refreshAccounts]);
+
+  const [pushState, setPushState] = useState<PushSupport>("unsupported");
+  const [pushBusy, setPushBusy] = useState(false);
+
+  useEffect(() => {
+    getPushSubscriptionState().then(setPushState);
+  }, []);
+
+  const togglePushNotifications = useCallback(async () => {
+    if (pushBusy) return;
+    setPushBusy(true);
+    try {
+      if (pushState === "subscribed") {
+        await disablePushNotifications();
+        setPushState("unsubscribed");
+      } else {
+        await enablePushNotifications();
+        setPushState("subscribed");
+      }
+    } catch (err) {
+      console.error("Failed to toggle push notifications:", err);
+    } finally {
+      setPushBusy(false);
+    }
+  }, [pushState, pushBusy]);
 
   const openSettings = useCallback(() => {
     setModalView("list");
@@ -330,6 +356,29 @@ export default function ValidatorLayout({ children }: { children: React.ReactNod
                 >
                   <Icon name="refresh" className="text-[16px] text-primary" />
                   Start Over
+                </button>
+              )}
+
+              {pushState !== "unsupported" && (
+                <button
+                  onClick={togglePushNotifications}
+                  disabled={pushBusy || pushState === "denied"}
+                  title={
+                    pushState === "denied"
+                      ? "Notifications blocked — enable them in your browser's site settings"
+                      : pushState === "subscribed"
+                      ? "Disable browser notifications for campaign start / account pause"
+                      : "Enable browser notifications for campaign start / account pause"
+                  }
+                  className={cn(
+                    "flex h-9 w-9 items-center justify-center rounded-lg border transition-all active:scale-95 shadow-sm",
+                    pushState === "subscribed"
+                      ? "border-primary/30 bg-primary/10 text-primary hover:bg-primary/15"
+                      : "border-outline bg-surface-container-low text-on-surface-variant hover:bg-surface-container hover:text-primary",
+                    pushState === "denied" ? "cursor-not-allowed opacity-50" : "cursor-pointer"
+                  )}
+                >
+                  <Icon name={pushState === "subscribed" ? "notifications_active" : "notifications"} className="text-[18px]" />
                 </button>
               )}
 

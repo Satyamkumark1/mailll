@@ -144,3 +144,18 @@ CREATE TABLE IF NOT EXISTS users (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS users_email_idx ON users (email);
+
+-- One row per browser subscribed to push notifications (lib/push-notifier.ts)
+-- for "campaign started sending" / "account auto-paused" events. Tied to the
+-- logged-in user for accountability, but notifications broadcast to every row
+-- here regardless of user_id — this is a single-operator tool, not
+-- multi-tenant. Endpoint is unique per browser+device; a stale one (the push
+-- service returns 404/410) is deleted lazily on the next send attempt.
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+  id SERIAL PRIMARY KEY,
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  endpoint TEXT NOT NULL UNIQUE,
+  p256dh TEXT NOT NULL,
+  auth TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
