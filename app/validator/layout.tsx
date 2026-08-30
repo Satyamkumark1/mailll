@@ -59,6 +59,36 @@ const CONFIRM_TONE_STYLES: Record<ConfirmTone, { icon: string; iconBox: string; 
 // immediately, if the registering page decides nothing needs confirming).
 type GuardedAction = (description: string, run: () => void) => void;
 
+const SMTP_PROVIDERS = {
+  gmail: { label: "Gmail / Google Workspace", host: "smtp.gmail.com", port: 465 },
+  outlook: { label: "Outlook / Microsoft 365", host: "smtp.office365.com", port: 587 },
+  yahoo: { label: "Yahoo Mail", host: "smtp.mail.yahoo.com", port: 465 },
+  zoho: { label: "Zoho Mail", host: "smtp.zoho.com", port: 465 },
+  hostinger: { label: "Hostinger", host: "smtp.hostinger.com", port: 465 },
+  custom: { label: "Custom SMTP", host: "", port: 465 },
+} as const;
+
+type SmtpProvider = keyof typeof SMTP_PROVIDERS;
+
+type AccountFormState = {
+  provider: SmtpProvider;
+  label: string;
+  smtpHost: string;
+  smtpPort: number;
+  smtpUser: string;
+  smtpPassword: string;
+  hourlyCap: number;
+  dailyCap: number;
+  warmupEnabled: boolean;
+};
+
+function providerForHost(host: string): SmtpProvider {
+  const provider = (Object.keys(SMTP_PROVIDERS) as SmtpProvider[]).find(
+    (key) => key !== "custom" && SMTP_PROVIDERS[key].host === host
+  );
+  return provider ?? "custom";
+}
+
 interface ValidatorChrome {
   confirmAction: (message: string, options?: ConfirmOptions) => Promise<boolean>;
   accounts: AccountView[] | null;
@@ -142,10 +172,11 @@ export default function ValidatorLayout({ children }: { children: React.ReactNod
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [modalView, setModalView] = useState<"list" | "form">("list");
   const [editingAccountId, setEditingAccountId] = useState<number | null>(null);
-  const [accountForm, setAccountForm] = useState({
+  const [accountForm, setAccountForm] = useState<AccountFormState>({
+    provider: "zoho" as SmtpProvider,
     label: "",
-    smtpHost: "",
-    smtpPort: 465,
+    smtpHost: SMTP_PROVIDERS.zoho.host,
+    smtpPort: SMTP_PROVIDERS.zoho.port,
     smtpUser: "",
     smtpPassword: "",
     hourlyCap: 35,
@@ -205,7 +236,7 @@ export default function ValidatorLayout({ children }: { children: React.ReactNod
   }, []);
 
   const openAddAccountForm = useCallback(() => {
-    setAccountForm({ label: "", smtpHost: "", smtpPort: 465, smtpUser: "", smtpPassword: "", hourlyCap: 35, dailyCap: 150, warmupEnabled: true });
+    setAccountForm({ provider: "zoho", label: "", smtpHost: SMTP_PROVIDERS.zoho.host, smtpPort: SMTP_PROVIDERS.zoho.port, smtpUser: "", smtpPassword: "", hourlyCap: 35, dailyCap: 150, warmupEnabled: true });
     setEditingAccountId(null);
     setSettingsError(null);
     setSettingsWarning(null);
@@ -214,6 +245,7 @@ export default function ValidatorLayout({ children }: { children: React.ReactNod
 
   const openEditAccountForm = useCallback((account: AccountView) => {
     setAccountForm({
+      provider: providerForHost(account.smtpHost),
       label: account.label,
       smtpHost: account.smtpHost,
       smtpPort: account.smtpPort,
@@ -227,6 +259,16 @@ export default function ValidatorLayout({ children }: { children: React.ReactNod
     setSettingsError(null);
     setSettingsWarning(null);
     setModalView("form");
+  }, []);
+
+  const selectSmtpProvider = useCallback((provider: SmtpProvider) => {
+    const preset = SMTP_PROVIDERS[provider];
+    setAccountForm((current) => ({
+      ...current,
+      provider,
+      smtpHost: preset.host,
+      smtpPort: preset.port,
+    }));
   }, []);
 
   const saveAccount = useCallback(async () => {
@@ -647,6 +689,20 @@ export default function ValidatorLayout({ children }: { children: React.ReactNod
                       <span className="text-[10px] font-bold text-on-surface-variant uppercase tracking-wider">SMTP Account</span>
                       <div className="grid grid-cols-2 gap-sm">
                         <label className="col-span-2 flex flex-col gap-xs">
+                          <span className="text-xs text-on-surface-variant font-semibold">Mail provider</span>
+                          <select
+                            value={accountForm.provider}
+                            onChange={(e) => selectSmtpProvider(e.target.value as SmtpProvider)}
+                            className="rounded-lg border border-outline bg-surface-container-low px-md py-sm text-body-sm text-on-surface"
+                          >
+                            {(Object.keys(SMTP_PROVIDERS) as SmtpProvider[]).map((provider) => (
+                              <option key={provider} value={provider}>
+                                {SMTP_PROVIDERS[provider].label}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label className="col-span-2 flex flex-col gap-xs">
                           <span className="text-xs text-on-surface-variant font-semibold">Label (optional)</span>
                           <input
                             type="text"
@@ -656,32 +712,13 @@ export default function ValidatorLayout({ children }: { children: React.ReactNod
                             className="rounded-lg border border-outline bg-surface-container-low px-md py-sm text-body-sm text-on-surface font-mono"
                           />
                         </label>
-                        <label className="col-span-2 flex flex-col gap-xs">
-                          <span className="text-xs text-on-surface-variant font-semibold">Host</span>
-                          <input
-                            type="text"
-                            value={accountForm.smtpHost}
-                            onChange={(e) => setAccountForm({ ...accountForm, smtpHost: e.target.value })}
-                            placeholder="smtp.zoho.in"
-                            className="rounded-lg border border-outline bg-surface-container-low px-md py-sm text-body-sm text-on-surface font-mono"
-                          />
-                        </label>
                         <label className="flex flex-col gap-xs">
-                          <span className="text-xs text-on-surface-variant font-semibold">Port</span>
+                          <span className="text-xs text-on-surface-variant font-semibold">Email address</span>
                           <input
-                            type="number"
-                            value={accountForm.smtpPort}
-                            onChange={(e) => setAccountForm({ ...accountForm, smtpPort: Number(e.target.value) || 465 })}
-                            className="rounded-lg border border-outline bg-surface-container-low px-md py-sm text-body-sm text-on-surface font-mono"
-                          />
-                        </label>
-                        <label className="flex flex-col gap-xs">
-                          <span className="text-xs text-on-surface-variant font-semibold">User (from-address)</span>
-                          <input
-                            type="text"
+                            type="email"
                             value={accountForm.smtpUser}
                             onChange={(e) => setAccountForm({ ...accountForm, smtpUser: e.target.value })}
-                            placeholder="hello@yourcompany.com"
+                            placeholder="you@yourcompany.com"
                             className="rounded-lg border border-outline bg-surface-container-low px-md py-sm text-body-sm text-on-surface font-mono"
                           />
                         </label>
@@ -695,6 +732,29 @@ export default function ValidatorLayout({ children }: { children: React.ReactNod
                             className="rounded-lg border border-outline bg-surface-container-low px-md py-sm text-body-sm text-on-surface font-mono"
                           />
                         </label>
+                        {accountForm.provider === "custom" && (
+                          <>
+                            <label className="col-span-2 flex flex-col gap-xs">
+                              <span className="text-xs text-on-surface-variant font-semibold">SMTP host</span>
+                              <input
+                                type="text"
+                                value={accountForm.smtpHost}
+                                onChange={(e) => setAccountForm({ ...accountForm, smtpHost: e.target.value })}
+                                placeholder="smtp.example.com"
+                                className="rounded-lg border border-outline bg-surface-container-low px-md py-sm text-body-sm text-on-surface font-mono"
+                              />
+                            </label>
+                            <label className="flex flex-col gap-xs">
+                              <span className="text-xs text-on-surface-variant font-semibold">SMTP port</span>
+                              <input
+                                type="number"
+                                value={accountForm.smtpPort}
+                                onChange={(e) => setAccountForm({ ...accountForm, smtpPort: Number(e.target.value) || 465 })}
+                                className="rounded-lg border border-outline bg-surface-container-low px-md py-sm text-body-sm text-on-surface font-mono"
+                              />
+                            </label>
+                          </>
+                        )}
                       </div>
                     </div>
 
