@@ -78,7 +78,7 @@ async function tick() {
     return { claimed: 0, sent: 0, failed: 0, deferred: 0 };
   }
 
-  const due = await claimDueEmails(Math.min(healthy.length, MAX_BATCH_SIZE));
+  const due = await claimDueEmails(MAX_BATCH_SIZE, healthy.map((h) => h.account.id));
 
   const loadById = new Map<number, AccountLoad>(
     healthy.map((h) => [
@@ -97,7 +97,7 @@ async function tick() {
   // Assigned synchronously, before any await, so concurrent dispatch below
   // can't all pick the same "most idle" account for different rows.
   const assignments = due.map((email) => {
-    const accountId = pickLeastLoadedAccount([...loadById.values()]);
+    const accountId = email.senderAccountId ?? pickLeastLoadedAccount([...loadById.values()]);
     if (accountId !== null) {
       const load = loadById.get(accountId)!;
       load.hourlyUsed += 1;

@@ -35,6 +35,7 @@ export interface CampaignListView {
   sentCount: number;
   failedCount: number;
   skippedCount: number;
+  senderAccountLabel: string | null;
 }
 
 export interface CampaignView extends CampaignListView {
@@ -46,12 +47,13 @@ export async function createBackgroundCampaign(
   drafts: DraftResult[],
   config: OutreachConfig,
   durationHours: number,
-  startAt?: string
+  startAt?: string,
+  senderAccountId?: number
 ): Promise<{ id: string; excludedCount: number }> {
   const res = await fetch("/api/campaigns", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ drafts, config, durationHours, startAt }),
+    body: JSON.stringify({ drafts, config, durationHours, startAt, senderAccountId }),
   });
   const data = await res.json();
   if (!res.ok) {
