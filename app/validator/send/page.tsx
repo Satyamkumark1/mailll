@@ -64,13 +64,35 @@ function engagementLabel(e: CampaignView["emails"][number]): string {
 }
 
 export default function SendPage() {
-  const { confirmAction, accounts, openSettings } = useValidatorChrome();
+  const {
+    confirmAction,
+    accounts,
+    openSettings,
+    refreshAccounts,
+    selectedSenderAccountId: chosenSenderAccountId,
+    setSelectedSenderAccountId,
+  } = useValidatorChrome();
   const activeAccountCount = accounts?.filter((a) => a.status === "active").length ?? 0;
   const { results, drafts, outreachConfig, rateLimitStatus, activeCampaignId, setRateLimitStatus, setActiveCampaignId } =
     useValidatorStore();
+  const activeSenderAccounts = useMemo(() => accounts?.filter((account) => account.status === "active") ?? [], [accounts]);
+  // An account already pinned to another still-running campaign is excluded
+  // here — createCampaign() enforces the same rule server-side (the real
+  // gate), this just keeps the picker from offering an account that would
+  // be rejected anyway.
+  const availableSenderAccounts = useMemo(
+    () => activeSenderAccounts.filter((account) => !account.lockedByCampaignId),
+    [activeSenderAccounts]
+  );
+  const lockedActiveAccounts = useMemo(
+    () => activeSenderAccounts.filter((account) => account.lockedByCampaignId),
+    [activeSenderAccounts]
+  );
 
   const [durationHours, setDurationHours] = useState<number | null>(null);
   const [durationTouched, setDurationTouched] = useState(false);
+  const [durationMode, setDurationMode] = useState<"duration" | "endAt">("duration");
+  const [endAtLocal, setEndAtLocal] = useState("");
   const [campaign, setCampaign] = useState<CampaignView | null>(null);
   const [campaignError, setCampaignError] = useState<string | null>(null);
   const [campaignNotice, setCampaignNotice] = useState<string | null>(null);
@@ -81,6 +103,23 @@ export default function SendPage() {
   const [recipientSearch, setRecipientSearch] = useState("");
   const [selectedToSkip, setSelectedToSkip] = useState<Set<string>>(new Set());
   const [isSkippingEmails, setIsSkippingEmails] = useState(false);
+
+  const selectedSenderAccountId = useMemo(() => {
+    if (availableSenderAccounts.length === 0) return null;
+    if (chosenSenderAccountId !== null && availableSenderAccounts.some((account) => account.id === chosenSenderAccountId)) {
+      return chosenSenderAccountId;
+    }
+    return availableSenderAccounts[0].id;
+  }, [availableSenderAccounts, chosenSenderAccountId]);
+
+  const selectedSenderAccount = useMemo(
+    () => availableSenderAccounts.find((account) => account.id === selectedSenderAccountId) ?? null,
+    [availableSenderAccounts, selectedSenderAccountId]
+  );
+  const selectedSenderAccountName = selectedSenderAccount ? selectedSenderAccount.label || selectedSenderAccount.smtpUser : null;
+  const selectedSenderAccountDisplay = selectedSenderAccount
+    ? `${selectedSenderAccountName} <${selectedSenderAccount.smtpUser}>`
+    : "Choose a sender account";
 
   const validContacts = useMemo(() => results.filter((r) => r.status === "valid"), [results]);
   const draftsStale = useMemo(() => computeDraftsStale(validContacts, drafts), [validContacts, drafts]);
@@ -147,8 +186,7 @@ export default function SendPage() {
   // the shortest duration that still keeps a human-ish pace and respects
   // the hourly cap, and only override it once the user actually edits the
   // field. See lib/campaign-schedule.ts.
-  const minCampaignHours = computeMinDurationHours(includedDrafts.length, rateLimitStatus?.hourly.cap ?? 35);
-  const effectiveDurationHours = durationTouched && durationHours !== null ? durationHours : minCampaignHours;
+  const minCampaignHours = computeMinDurationHours(includedDrafts.length, selectedSenderAccount?.effective.hourlyCap ?? 35);
 
   // Pure — just checks the picked value parses, no time-dependent
   // comparison (that happens at submit time in scheduleCampaign, inside an
@@ -161,23 +199,77 @@ export default function SendPage() {
   );
   const startAtMissing = startMode === "at" && (!resolvedStartAt || Number.isNaN(resolvedStartAt.getTime()));
 
+  const resolvedEndAt = useMemo(
+    () => (durationMode === "endAt" && endAtLocal ? new Date(endAtLocal) : null),
+    [durationMode, endAtLocal]
+  );
+  const endAtMissing = durationMode === "endAt" && (!resolvedEndAt || Number.isNaN(resolvedEndAt.getTime()));
+
+  // Render must stay pure (no Date.now() call during render — React can
+  // double-invoke it), so this is a one-time snapshot from mount rather than
+  // a live clock — it's only used for the "currently equivalent to X hours"
+  // display hint below. The value actually submitted is recomputed fresh
+  // with a real Date.now() call inside scheduleCampaign's event handler,
+  // where that's safe — see computeSubmissionDurationHours below — so this
+  // being slightly stale never affects what's actually scheduled.
+  const [nowTick] = useState(() => Date.now());
+
+  // Re-derives durationHours from an absolute target end time instead of a
+  // relative "hours from now" — the point being that if every one of several
+  // independently-created campaigns is given the same startAtLocal and the
+  // same endAtLocal, each one's own duration naturally lands its windowEnd
+  // on that identical shared clock time, regardless of exactly when each was
+  // actually submitted. No backend change needed: this is just a different
+  // way to arrive at the same durationHours number createCampaign already
+  // takes. This value drives the live UI hint only — see
+  // computeSubmissionDurationHours for the authoritative one used on submit.
+  const effectiveDurationHours = useMemo(() => {
+    if (durationMode === "endAt") {
+      if (!resolvedEndAt || Number.isNaN(resolvedEndAt.getTime())) return minCampaignHours;
+      const effectiveStartMs = resolvedStartAt?.getTime() ?? nowTick;
+      return Math.max(0, (resolvedEndAt.getTime() - effectiveStartMs) / 3_600_000);
+    }
+    return durationTouched && durationHours !== null ? durationHours : minCampaignHours;
+  }, [durationMode, resolvedEndAt, resolvedStartAt, nowTick, durationTouched, durationHours, minCampaignHours]);
+
+  // The number that actually gets sent to createCampaign — recomputed with a
+  // fresh Date.now() at call time (safe here, this only ever runs inside the
+  // scheduleCampaign event handler) so an "end at" target lands on the exact
+  // clock time regardless of how stale the render-time nowTick above is.
+  const computeSubmissionDurationHours = useCallback(() => {
+    if (durationMode === "endAt" && resolvedEndAt && !Number.isNaN(resolvedEndAt.getTime())) {
+      const effectiveStartMs = resolvedStartAt?.getTime() ?? Date.now();
+      return Math.max(0, (resolvedEndAt.getTime() - effectiveStartMs) / 3_600_000);
+    }
+    return effectiveDurationHours;
+  }, [durationMode, resolvedEndAt, resolvedStartAt, effectiveDurationHours]);
+
   const scheduleCampaign = useCallback(async () => {
+    if (!selectedSenderAccountId || !selectedSenderAccount) {
+      setCampaignError("Choose a sender account before scheduling.");
+      return;
+    }
     if (startMode === "at" && (!resolvedStartAt || Number.isNaN(resolvedStartAt.getTime()) || resolvedStartAt.getTime() <= Date.now())) {
       setCampaignError("Pick a start time in the future.");
       return;
     }
+    if (durationMode === "endAt") {
+      const effectiveStartMs = resolvedStartAt?.getTime() ?? Date.now();
+      if (!resolvedEndAt || Number.isNaN(resolvedEndAt.getTime()) || resolvedEndAt.getTime() <= effectiveStartMs) {
+        setCampaignError("Pick an end time after the start time.");
+        return;
+      }
+    }
 
+    const submissionDurationHours = computeSubmissionDurationHours();
     const startDescription =
       startMode === "at" && resolvedStartAt ? `starting at ${resolvedStartAt.toLocaleString()}` : "starting now";
-    const rateLimitNote =
-      rateLimitStatus && !rateLimitStatus.allowed
-        ? ` Note: you've already hit ${describeRateLimitBlock(rateLimitStatus)}, so sending won't actually start for about ${formatRetryAfter(
-            rateLimitStatus.retryAfterSeconds
-          )} — the campaign will queue and catch up automatically as capacity frees up.`
-        : "";
+    const endDescription =
+      durationMode === "endAt" && resolvedEndAt
+        ? `ending at ${resolvedEndAt.toLocaleString()}`
+        : `spread over ${formatDurationHours(submissionDurationHours)}`;
     const confirmed = await confirmAction(
-      `This will schedule ${includedDrafts.length} real email(s) to send from your Gmail account, ${startDescription}, spread over ${formatDurationHours(effectiveDurationHours)}, ` +
-        `continuing on the server even if you close this tab. This cannot be undone once sent.${rateLimitNote} Continue?`,
+      `This will schedule ${includedDrafts.length} real email(s) to send from ${selectedSenderAccountDisplay}, ${startDescription}, ${endDescription}, continuing on the server even if you close this tab. This cannot be undone once sent. Continue?`,
       { title: "Schedule background campaign?", confirmLabel: "Schedule campaign", tone: "primary" }
     );
     if (!confirmed) return;
@@ -189,12 +281,18 @@ export default function SendPage() {
       const { id, excludedCount } = await createBackgroundCampaign(
         includedDrafts,
         outreachConfig,
-        effectiveDurationHours,
-        resolvedStartAt ? resolvedStartAt.toISOString() : undefined
+        submissionDurationHours,
+        resolvedStartAt ? resolvedStartAt.toISOString() : undefined,
+        selectedSenderAccountId ?? undefined
       );
       window.localStorage.setItem(CAMPAIGN_ID_STORAGE_KEY, id);
       setActiveCampaignId(id);
       await refreshCampaign(id);
+      // The just-picked account is now locked to this campaign — refresh so
+      // it disappears from the picker immediately, since the real workflow
+      // this supports is repeating this same page multiple times in one
+      // sitting to launch several campaigns on different accounts.
+      await refreshAccounts();
       if (excludedCount > 0) {
         setCampaignNotice(`Scheduled — ${excludedCount} recipient(s) skipped (already suppressed).`);
       }
@@ -204,7 +302,22 @@ export default function SendPage() {
     } finally {
       setIsSchedulingCampaign(false);
     }
-  }, [includedDrafts, outreachConfig, effectiveDurationHours, startMode, resolvedStartAt, rateLimitStatus, setActiveCampaignId, refreshCampaign, confirmAction]);
+  }, [
+    includedDrafts,
+    outreachConfig,
+    computeSubmissionDurationHours,
+    startMode,
+    resolvedStartAt,
+    durationMode,
+    resolvedEndAt,
+    selectedSenderAccountDisplay,
+    selectedSenderAccountId,
+    selectedSenderAccount,
+    setActiveCampaignId,
+    refreshCampaign,
+    refreshAccounts,
+    confirmAction,
+  ]);
 
   const cancelCampaign = useCallback(async () => {
     if (!activeCampaignId) return;
@@ -294,7 +407,7 @@ export default function SendPage() {
     return (
       <p className="flex flex-wrap items-center gap-x-sm gap-y-1 text-body-sm text-on-surface-variant font-semibold">
         <Icon name="lock" className="text-[20px] text-primary" />
-        Sending from {activeAccountCount} of {accounts.length} account{accounts.length === 1 ? "" : "s"}.{" "}
+        {selectedSenderAccount ? `Sending from ${selectedSenderAccountDisplay}.` : "Choose a sender account below."}{" "}
         <button onClick={openSettings} className="text-primary font-bold hover:underline cursor-pointer">
           Manage
         </button>
@@ -382,9 +495,12 @@ export default function SendPage() {
             )}
           </div>
           <p className="text-xs text-on-surface-variant">
-            {campaign.status === "running"
+          {campaign.status === "running"
               ? "You can close this tab — sending continues on the server until the window ends."
               : `Finished ${new Date(campaign.windowEnd).toLocaleString()}.`}
+          </p>
+          <p className="text-xs font-mono text-on-surface-variant/80">
+            Sender account: {campaign.senderAccountLabel ?? "Legacy pooled campaign"}
           </p>
           <p className="text-xs font-mono text-on-surface-variant/80">
             Scheduled window: {new Date(campaign.windowStart).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}
@@ -639,6 +755,62 @@ export default function SendPage() {
           Delivered/Bounced status is inferred by checking your sending mailbox over IMAP for bounce-back notifications — it needs IMAP access enabled on the same account, and &quot;Delivered&quot; means no bounce arrived after 24 hours, not a guaranteed inbox placement.
         </p>
         <div className="pt-sm border-t border-outline/50">
+          <span className="text-[10px] font-bold text-on-surface-variant uppercase tracking-wider">Send from</span>
+          {activeSenderAccounts.length === 0 ? (
+            <div className="mt-sm flex items-center justify-between gap-sm rounded-lg border border-amber-500/25 bg-amber-500/10 px-md py-sm text-body-sm text-amber-200">
+              <span>No active sender account configured yet.</span>
+              <button
+                onClick={openSettings}
+                className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-sm py-xs text-xs font-bold text-amber-200 hover:bg-amber-500/20 cursor-pointer"
+              >
+                Open Settings
+              </button>
+            </div>
+          ) : availableSenderAccounts.length === 0 ? (
+            <div className="mt-sm flex items-center justify-between gap-sm rounded-lg border border-amber-500/25 bg-amber-500/10 px-md py-sm text-body-sm text-amber-200">
+              <span>Every active account is already sending a campaign — wait for one to finish or add another.</span>
+              <button
+                onClick={openSettings}
+                className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-sm py-xs text-xs font-bold text-amber-200 hover:bg-amber-500/20 cursor-pointer"
+              >
+                Open Settings
+              </button>
+            </div>
+          ) : availableSenderAccounts.length === 1 ? (
+            <p className="mt-sm text-body-sm text-on-surface-variant font-medium">
+              This campaign will send from <span className="font-bold text-on-surface">{selectedSenderAccountDisplay}</span>.
+            </p>
+          ) : (
+            <div className="mt-sm space-y-xs">
+                <select
+                  value={selectedSenderAccountId ?? ""}
+                onChange={(e) => setSelectedSenderAccountId(Number(e.target.value))}
+                  disabled={isSchedulingCampaign}
+                  className="w-full max-w-lg rounded-lg border border-outline bg-surface-container-low px-md py-sm text-body-sm text-on-surface outline-none focus:border-primary focus:ring-2 focus:ring-primary/20 disabled:opacity-50"
+                >
+                {availableSenderAccounts.map((account) => {
+                  const label = account.label || account.smtpUser;
+                  return (
+                    <option key={account.id} value={account.id}>
+                      {label} ({account.smtpUser})
+                    </option>
+                  );
+                })}
+              </select>
+              <p className="text-xs text-on-surface-variant">
+                Pick the mailbox to send this campaign from. Only the selected account will be used.
+              </p>
+            </div>
+          )}
+          {lockedActiveAccounts.length > 0 && (
+            <p className="mt-xs text-xs text-on-surface-variant">
+              {lockedActiveAccounts.map((a) => a.label || a.smtpUser).join(", ")}{" "}
+              {lockedActiveAccounts.length === 1 ? "is" : "are"} already sending another campaign, so{" "}
+              {lockedActiveAccounts.length === 1 ? "it isn't" : "they aren't"} shown here.
+            </p>
+          )}
+        </div>
+        <div className="pt-sm border-t border-outline/50">
           <span className="text-[10px] font-bold text-on-surface-variant uppercase tracking-wider">Start</span>
           <div className="mt-sm flex flex-wrap gap-xs">
             {(["now", "at"] as const).map((mode) => (
@@ -674,21 +846,54 @@ export default function SendPage() {
         </div>
         <div className="pt-sm border-t border-outline/50">
           <span className="text-[10px] font-bold text-on-surface-variant uppercase tracking-wider">Spread sends over</span>
-          <div className="mt-sm flex items-center gap-sm">
-            <input
-              type="number"
-              min={minCampaignHours}
-              step="0.01"
-              value={Math.round(effectiveDurationHours * 100) / 100}
-              onChange={(e) => {
-                setDurationHours(Math.max(minCampaignHours, Number(e.target.value) || minCampaignHours));
-                setDurationTouched(true);
-              }}
-              disabled={isSchedulingCampaign}
-              className="w-28 rounded-lg border border-outline bg-surface-container-low px-md py-sm text-body-sm text-on-surface font-mono"
-            />
-            <span className="text-body-sm text-on-surface-variant">hours (minimum {formatDurationHours(minCampaignHours)} for {includedDrafts.length} email(s))</span>
+          <div className="mt-sm flex flex-wrap gap-xs">
+            {(["duration", "endAt"] as const).map((mode) => (
+              <button
+                key={mode}
+                onClick={() => setDurationMode(mode)}
+                disabled={isSchedulingCampaign}
+                className={cn(
+                  "rounded-lg px-md py-sm text-xs font-bold uppercase transition-all border cursor-pointer",
+                  durationMode === mode
+                    ? "bg-primary/10 border-primary text-primary"
+                    : "bg-surface border-outline text-on-surface-variant hover:border-primary"
+                )}
+              >
+                {mode === "duration" ? "Fixed duration" : "End at a specific time"}
+              </button>
+            ))}
           </div>
+          {durationMode === "duration" ? (
+            <div className="mt-sm flex items-center gap-sm">
+              <input
+                type="number"
+                min={minCampaignHours}
+                step="0.01"
+                value={Math.round(effectiveDurationHours * 100) / 100}
+                onChange={(e) => {
+                  setDurationHours(Math.max(minCampaignHours, Number(e.target.value) || minCampaignHours));
+                  setDurationTouched(true);
+                }}
+                disabled={isSchedulingCampaign}
+                className="w-28 rounded-lg border border-outline bg-surface-container-low px-md py-sm text-body-sm text-on-surface font-mono"
+              />
+              <span className="text-body-sm text-on-surface-variant">hours (minimum {formatDurationHours(minCampaignHours)} for {includedDrafts.length} email(s))</span>
+            </div>
+          ) : (
+            <div className="mt-sm">
+              <input
+                type="datetime-local"
+                value={endAtLocal}
+                onChange={(e) => setEndAtLocal(e.target.value)}
+                disabled={isSchedulingCampaign}
+                className="rounded-lg border border-outline bg-surface-container-low px-md py-sm text-body-sm text-on-surface font-mono"
+              />
+              <p className="mt-xs text-xs text-on-surface-variant font-medium">
+                Enter the same end time across several campaigns (each pinned to a different account) to make them all finish together, no matter how many minutes apart you actually create each one — the duration each one sends over is derived from this to land exactly on it.
+                {" "}Currently equivalent to {formatDurationHours(effectiveDurationHours)}{effectiveDurationHours < minCampaignHours ? ` — below the safe minimum of ${formatDurationHours(minCampaignHours)} for ${includedDrafts.length} email(s)` : ""}.
+              </p>
+            </div>
+          )}
           <p className="mt-sm text-xs text-on-surface-variant font-medium">
             A small batch defaults to a quick, human-paced send rather than being stretched out — the minimum above already keeps a safe gap between sends. Sends are spaced evenly across whatever window you pick; if the hourly/daily cap is hit, remaining emails wait for the next opening rather than being dropped.
           </p>
@@ -696,11 +901,24 @@ export default function SendPage() {
         {renderRateLimitNotice()}
         <button
           onClick={scheduleCampaign}
-          disabled={isSchedulingCampaign || includedDrafts.length === 0 || draftsStale || startAtMissing || campaign?.status === "running" || activeAccountCount === 0}
+          disabled={
+            isSchedulingCampaign ||
+            includedDrafts.length === 0 ||
+            draftsStale ||
+            startAtMissing ||
+            endAtMissing ||
+            campaign?.status === "running" ||
+            activeAccountCount === 0 ||
+            selectedSenderAccountId === null
+          }
           className="flex items-center gap-sm rounded-lg bg-primary px-lg py-md text-label-md font-extrabold text-on-primary shadow-lg shadow-primary/20 transition-all hover:scale-[1.02] active:scale-95 disabled:opacity-50 cursor-pointer"
         >
           <Icon name="schedule_send" className="text-[18px]" />
-          {isSchedulingCampaign ? "Scheduling..." : `Schedule ${includedDrafts.length} email(s) over ${formatDurationHours(effectiveDurationHours)}`}
+          {isSchedulingCampaign
+            ? "Scheduling..."
+            : `Schedule ${includedDrafts.length} email(s) from ${selectedSenderAccountName ?? "selected account"} over ${formatDurationHours(
+                effectiveDurationHours
+              )}`}
         </button>
       </div>
     </div>

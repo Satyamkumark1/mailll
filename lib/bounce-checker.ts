@@ -23,6 +23,23 @@ function deriveImapHost(smtpHost: string): string {
   return smtpHost.startsWith("smtp.") ? smtpHost.replace(/^smtp\./, "imap.") : smtpHost;
 }
 
+// imapflow throws the same generic "Command failed" Error for any IMAP
+// NO/BAD reply — LOGIN rejection, bad SELECT, bad FETCH range all look
+// identical via err.message alone. The actual command and server response
+// text live on err.executedCommand/err.response, which is what's needed to
+// tell "wrong IMAP credentials" apart from "mailbox doesn't exist" in logs.
+function describeImapError(err: unknown): string {
+  if (!(err instanceof Error)) return String(err);
+  const response = (err as { response?: { attributes?: { type: string; value: string }[] } }).response;
+  const executedCommand = (err as { executedCommand?: string }).executedCommand;
+  if (!executedCommand) return err.message;
+  const serverText = response?.attributes
+    ?.filter((a) => a.type === "TEXT")
+    .map((a) => a.value)
+    .join(" ");
+  return `${err.message} (command: ${executedCommand}${serverText ? `, server said: ${serverText}` : ""})`;
+}
+
 function extractFinalRecipient(dsnText: string): string | null {
   const match = dsnText.match(/Final-Recipient:\s*(?:rfc822;)?\s*<?([^\s>]+)>?/i);
   return match ? match[1].toLowerCase().trim() : null;
@@ -68,27 +85,34 @@ async function processMessage(source: Buffer): Promise<void> {
 
   const reason = extractDiagnostic(dsnText) ?? subject.slice(0, 300) ?? null;
   const bounceType = classifyBounceType(dsnText);
-  const [updated] = await sql`
-    UPDATE campaign_emails
-    SET delivery_status = 'bounced', bounce_reason = ${reason}, bounce_type = ${bounceType}, bounce_checked_at = now()
-    WHERE id = (
-      SELECT id FROM campaign_emails
-      WHERE to_email = ${recipient} AND status = 'sent' AND delivery_status IS NULL
-      ORDER BY sent_at DESC
-      LIMIT 1
-    )
-    RETURNING id
-  `;
 
-  // A hard bounce means the address itself is gone — suppress it for good so
-  // no future campaign re-targets it, rather than relying on someone to
-  // notice and remove it by hand.
-  if (bounceType === "hard" && updated) {
-    await sql`
-      INSERT INTO suppressed_emails (email, reason) VALUES (${recipient}, 'hard_bounce')
-      ON CONFLICT (email) DO NOTHING
-    `;
-  }
+  // The status update and the (hard-bounce-only) suppression insert are one
+  // statement, not two — the Neon HTTP driver has no interactive transactions
+  // (each separate `sql` call autocommits on its own), so two statements here
+  // could leave delivery_status = 'bounced' committed with the suppression
+  // insert never applied. That's not just inconsistent: a retry's `WHERE
+  // delivery_status IS NULL` would then match nothing, silently skipping the
+  // insert forever and leaving a hard-bounced address suppressable-but-never-
+  // suppressed. A single statement is atomic by construction, and if it
+  // throws, this message is never marked processed — pollInbox only advances
+  // its UID checkpoint after its whole fetch loop finishes without throwing,
+  // so the next poll just retries this same message from scratch.
+  await sql`
+    WITH updated AS (
+      UPDATE campaign_emails
+      SET delivery_status = 'bounced', bounce_reason = ${reason}, bounce_type = ${bounceType}, bounce_checked_at = now()
+      WHERE id = (
+        SELECT id FROM campaign_emails
+        WHERE to_email = ${recipient} AND status = 'sent' AND delivery_status IS NULL
+        ORDER BY sent_at DESC
+        LIMIT 1
+      )
+      RETURNING id
+    )
+    INSERT INTO suppressed_emails (email, reason)
+    SELECT ${recipient}, 'hard_bounce' FROM updated WHERE ${bounceType} = 'hard'
+    ON CONFLICT (email) DO NOTHING
+  `;
 }
 
 async function markInferredDelivered(): Promise<void> {
@@ -168,7 +192,7 @@ async function checkBouncesForAccount(account: SenderAccount): Promise<void> {
   } catch (err) {
     // Best-effort — IMAP misconfiguration on one account must never take
     // down bounce checking for the others, or the send cron itself.
-    console.error(`IMAP bounce check failed for account ${account.id}:`, err instanceof Error ? err.message : err);
+    console.error(`IMAP bounce check failed for account ${account.id}:`, describeImapError(err));
   }
 }
 

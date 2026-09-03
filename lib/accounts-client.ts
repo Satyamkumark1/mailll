@@ -12,6 +12,7 @@ export interface AccountView {
   warmupEnabled: boolean;
   consecutiveFailures: number;
   effective: EffectiveRateLimitConfig;
+  lockedByCampaignId: string | null;
 }
 
 export interface SaveAccountPayload {

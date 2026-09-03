@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
 -- EXISTS above won't add a column to a table that already exists.
 ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS consecutive_failures INT NOT NULL DEFAULT 0;
 ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS skipped_count INT NOT NULL DEFAULT 0;
+ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS sender_account_id INT;
 
 CREATE TABLE IF NOT EXISTS campaign_emails (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -137,6 +138,15 @@ ALTER TABLE sender_accounts ADD COLUMN IF NOT EXISTS bounce_last_uid BIGINT NOT 
 ALTER TABLE sender_accounts ADD COLUMN IF NOT EXISTS bounce_uidvalidity BIGINT NOT NULL DEFAULT 0;
 UPDATE sender_accounts SET label = smtp_user WHERE label IS NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS sender_accounts_smtp_user_key ON sender_accounts (smtp_user);
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'campaigns_sender_account_id_fkey') THEN
+    ALTER TABLE campaigns
+      ADD CONSTRAINT campaigns_sender_account_id_fkey
+      FOREIGN KEY (sender_account_id) REFERENCES sender_accounts(id) ON DELETE SET NULL;
+  END IF;
+END $$;
 
 -- Ties a send attempt / a sent campaign email to the account that actually
 -- sent it. Nullable: campaign_emails.account_id is only set once a row is

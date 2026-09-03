@@ -1,9 +1,10 @@
+import { getAccountsLockedByRunningCampaign } from "@/lib/campaigns";
 import { createAccount, getEffectiveRateLimitConfig, listAccounts, type SaveAccountInput } from "@/lib/sender-accounts";
 
 export const runtime = "nodejs";
 
 export async function GET() {
-  const accounts = await listAccounts();
+  const [accounts, lockedByAccountId] = await Promise.all([listAccounts(), getAccountsLockedByRunningCampaign()]);
   return Response.json({
     accounts: accounts.map((a) => ({
       id: a.id,
@@ -17,6 +18,7 @@ export async function GET() {
       warmupEnabled: a.warmupEnabled,
       consecutiveFailures: a.consecutiveFailures,
       effective: getEffectiveRateLimitConfig(a),
+      lockedByCampaignId: lockedByAccountId.get(a.id) ?? null,
     })),
   });
 }

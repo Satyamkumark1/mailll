@@ -92,6 +92,8 @@ function providerForHost(host: string): SmtpProvider {
 interface ValidatorChrome {
   confirmAction: (message: string, options?: ConfirmOptions) => Promise<boolean>;
   accounts: AccountView[] | null;
+  selectedSenderAccountId: number | null;
+  setSelectedSenderAccountId: (id: number | null) => void;
   refreshAccounts: () => Promise<void>;
   openSettings: () => void;
   setGuardedAction: (fn: GuardedAction | null) => void;
@@ -169,6 +171,7 @@ export default function ValidatorLayout({ children }: { children: React.ReactNod
   );
 
   const [accounts, setAccounts] = useState<AccountView[] | null>(null);
+  const [selectedSenderAccountId, setSelectedSenderAccountId] = useState<number | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [modalView, setModalView] = useState<"list" | "form">("list");
   const [editingAccountId, setEditingAccountId] = useState<number | null>(null);
@@ -363,8 +366,16 @@ export default function ValidatorLayout({ children }: { children: React.ReactNod
   };
 
   const chrome = useMemo<ValidatorChrome>(
-    () => ({ confirmAction, accounts, refreshAccounts, openSettings, setGuardedAction }),
-    [confirmAction, accounts, refreshAccounts, openSettings]
+    () => ({
+      confirmAction,
+      accounts,
+      selectedSenderAccountId,
+      setSelectedSenderAccountId,
+      refreshAccounts,
+      openSettings,
+      setGuardedAction,
+    }),
+    [confirmAction, accounts, selectedSenderAccountId, refreshAccounts, openSettings]
   );
 
   const userInitial = user?.email ? user.email.charAt(0).toUpperCase() : "U";
@@ -591,7 +602,7 @@ export default function ValidatorLayout({ children }: { children: React.ReactNod
                   <div className="space-y-md">
                     <div className="flex items-center justify-between">
                       <p className="text-xs text-on-surface-variant">
-                        Recipients are auto-assigned across every active account, least-loaded first.
+                        Choose which active mailbox this campaign should send from.
                       </p>
                       <button
                         onClick={openAddAccountForm}
@@ -608,7 +619,13 @@ export default function ValidatorLayout({ children }: { children: React.ReactNod
                     ) : (
                       <div className="space-y-sm">
                         {accounts.map((account) => (
-                          <div key={account.id} className="rounded-lg border border-outline bg-surface-container-low p-md space-y-xs">
+                          <div
+                            key={account.id}
+                            className={cn(
+                              "rounded-lg border bg-surface-container-low p-md space-y-xs",
+                              selectedSenderAccountId === account.id ? "border-primary ring-1 ring-primary/30" : "border-outline"
+                            )}
+                          >
                             <div className="flex items-center justify-between gap-sm">
                               <div className="min-w-0">
                                 <p className="text-body-sm font-bold text-on-surface truncate">{account.label}</p>
@@ -636,6 +653,22 @@ export default function ValidatorLayout({ children }: { children: React.ReactNod
                               </p>
                             )}
                             <div className="flex flex-wrap gap-xs pt-1">
+                              {account.status === "active" && (
+                                <button
+                                  onClick={() => {
+                                    setSelectedSenderAccountId(account.id);
+                                    setSettingsOpen(false);
+                                  }}
+                                  className={cn(
+                                    "rounded-lg border px-sm py-xs text-xs font-bold cursor-pointer",
+                                    selectedSenderAccountId === account.id
+                                      ? "border-primary bg-primary/10 text-primary"
+                                      : "border-primary/40 bg-primary/10 text-primary hover:bg-primary/20"
+                                  )}
+                                >
+                                  {selectedSenderAccountId === account.id ? "Selected for sending" : "Use for sending"}
+                                </button>
+                              )}
                               <button
                                 onClick={() => openEditAccountForm(account)}
                                 className="rounded-lg border border-outline bg-surface px-sm py-xs text-xs font-bold text-on-surface transition-colors hover:bg-surface-container cursor-pointer"

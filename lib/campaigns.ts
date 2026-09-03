@@ -48,6 +48,7 @@ export interface CampaignListItem {
   sentCount: number;
   failedCount: number;
   skippedCount: number;
+  senderAccountLabel: string | null;
 }
 
 export interface CampaignSummary extends CampaignListItem {
@@ -62,6 +63,9 @@ export interface CreateCampaignInput {
   // Optional future start time (ISO string). Omitted, or in the past,
   // means "start now" — we never silently schedule into the past.
   startAt?: string;
+  // When set, this campaign is pinned to one sender account instead of
+  // drawing from the whole active pool.
+  senderAccountId?: number | null;
 }
 
 export interface CreateCampaignResult {
@@ -73,7 +77,13 @@ export interface CreateCampaignResult {
   excludedCount: number;
 }
 
-export async function createCampaign({ drafts, config, durationHours, startAt }: CreateCampaignInput): Promise<CreateCampaignResult> {
+export async function createCampaign({
+  drafts,
+  config,
+  durationHours,
+  startAt,
+  senderAccountId,
+}: CreateCampaignInput): Promise<CreateCampaignResult> {
   const suppressed = await sql`
     SELECT email FROM suppressed_emails WHERE email = ANY(${drafts.map((d) => d.email.toLowerCase())}::text[])
   `;
@@ -83,6 +93,29 @@ export async function createCampaign({ drafts, config, durationHours, startAt }:
     throw new Error("All recipients are suppressed — nothing to schedule");
   }
 
+  if (senderAccountId !== undefined && senderAccountId !== null) {
+    const [senderAccount] = await sql`
+      SELECT id, label, status
+      FROM sender_accounts
+      WHERE id = ${senderAccountId}
+    `;
+    if (!senderAccount) {
+      throw new Error("Selected sender account not found");
+    }
+    if (senderAccount.status !== "active") {
+      throw new Error("Selected sender account is paused");
+    }
+    // The real gate against double-booking an account — checked here, not
+    // just hidden in the UI, so a stale dropdown or a direct API call can't
+    // pin two running campaigns to the same mailbox.
+    const [lockedBy] = await sql`
+      SELECT id FROM campaigns WHERE sender_account_id = ${senderAccountId} AND status = 'running'
+    `;
+    if (lockedBy) {
+      throw new Error("This account is already sending another campaign — pick a different one or wait for it to finish.");
+    }
+  }
+
   const now = new Date();
   const requestedStart = startAt ? new Date(startAt) : now;
   const windowStart = requestedStart.getTime() > now.getTime() ? requestedStart : now;
@@ -90,8 +123,8 @@ export async function createCampaign({ drafts, config, durationHours, startAt }:
   const scheduledTimes = computeScheduledTimes(includedDrafts.length, windowStart, windowEnd);
 
   const [campaign] = await sql`
-    INSERT INTO campaigns (window_start, window_end, total_count)
-    VALUES (${windowStart.toISOString()}, ${windowEnd.toISOString()}, ${includedDrafts.length})
+    INSERT INTO campaigns (window_start, window_end, total_count, sender_account_id)
+    VALUES (${windowStart.toISOString()}, ${windowEnd.toISOString()}, ${includedDrafts.length}, ${senderAccountId ?? null})
     RETURNING id
   `;
   const campaignId = campaign.id as string;
@@ -114,7 +147,7 @@ export async function createCampaign({ drafts, config, durationHours, startAt }:
 
   await sql`
     INSERT INTO campaign_emails (id, campaign_id, to_email, subject, body, html, scheduled_at)
-    SELECT id, ${campaignId}, * FROM unnest(
+    SELECT id, ${campaignId}, to_email, subject, body, html, scheduled_at FROM unnest(
       ${ids}::uuid[],
       ${toEmails}::text[],
       ${subjects}::text[],
@@ -127,11 +160,24 @@ export async function createCampaign({ drafts, config, durationHours, startAt }:
   return { id: campaignId, excludedCount: drafts.length - includedDrafts.length };
 }
 
+// Which active accounts are currently pinned to a still-running campaign —
+// used by the accounts API to hide/explain unavailable accounts in the Send
+// page's picker. Read-only; the actual enforcement gate lives in
+// createCampaign() above, since a UI snapshot can go stale between renders.
+export async function getAccountsLockedByRunningCampaign(): Promise<Map<number, string>> {
+  const rows = await sql`
+    SELECT sender_account_id, id FROM campaigns WHERE status = 'running' AND sender_account_id IS NOT NULL
+  `;
+  return new Map(rows.map((r) => [r.sender_account_id as number, r.id as string]));
+}
+
 export async function listCampaigns(limit = 50): Promise<CampaignListItem[]> {
   const rows = await sql`
-    SELECT id, status, created_at, window_start, window_end, total_count, sent_count, failed_count, skipped_count
-    FROM campaigns
-    ORDER BY created_at DESC
+    SELECT c.id, c.status, c.created_at, c.window_start, c.window_end, c.total_count, c.sent_count, c.failed_count,
+      c.skipped_count, sa.label AS sender_account_label
+    FROM campaigns c
+    LEFT JOIN sender_accounts sa ON sa.id = c.sender_account_id
+    ORDER BY c.created_at DESC
     LIMIT ${limit}
   `;
   return rows.map((c) => ({
@@ -144,11 +190,18 @@ export async function listCampaigns(limit = 50): Promise<CampaignListItem[]> {
     sentCount: c.sent_count as number,
     failedCount: c.failed_count as number,
     skippedCount: c.skipped_count as number,
+    senderAccountLabel: (c.sender_account_label as string | null) ?? null,
   }));
 }
 
 export async function getCampaign(id: string): Promise<CampaignSummary | null> {
-  const [campaign] = await sql`SELECT * FROM campaigns WHERE id = ${id}`;
+  const [campaign] = await sql`
+    SELECT c.id, c.status, c.created_at, c.window_start, c.window_end, c.total_count, c.sent_count, c.failed_count,
+      c.skipped_count, c.consecutive_failures, sa.label AS sender_account_label
+    FROM campaigns c
+    LEFT JOIN sender_accounts sa ON sa.id = c.sender_account_id
+    WHERE c.id = ${id}
+  `;
   if (!campaign) return null;
 
   const emails = await sql`
@@ -171,6 +224,7 @@ export async function getCampaign(id: string): Promise<CampaignSummary | null> {
     failedCount: campaign.failed_count as number,
     skippedCount: campaign.skipped_count as number,
     consecutiveFailures: campaign.consecutive_failures as number,
+    senderAccountLabel: (campaign.sender_account_label as string | null) ?? null,
     emails: emails.map((e) => ({
       id: e.id as string,
       email: e.to_email as string,
@@ -275,6 +329,7 @@ export interface DueEmail {
   subject: string;
   body: string;
   html: string;
+  senderAccountId: number | null;
 }
 
 // One claimed email's dispatch outcome in a cron tick — see
@@ -308,12 +363,13 @@ export function summarizeDispatchResults(results: PromiseSettledResult<DispatchO
 
 // Locks and returns up to `limit` due rows across all running campaigns so
 // an overlapping cron invocation can't double-send the same email.
-export async function claimDueEmails(limit: number): Promise<DueEmail[]> {
+export async function claimDueEmails(limit: number, healthyAccountIds: number[]): Promise<DueEmail[]> {
   const rows = await sql`
     WITH due AS (
-      SELECT ce.id
+      SELECT ce.id, c.sender_account_id
       FROM campaign_emails ce
       JOIN campaigns c ON c.id = ce.campaign_id
+      LEFT JOIN sender_accounts sa ON sa.id = c.sender_account_id
       WHERE c.status = 'running'
         AND ce.scheduled_at <= now()
         AND (
@@ -321,6 +377,10 @@ export async function claimDueEmails(limit: number): Promise<DueEmail[]> {
           -- a row stuck in 'sending' means a prior tick claimed it but never
           -- recorded a result (e.g. hit the function timeout) — retry it.
           OR (ce.status = 'sending' AND ce.scheduled_at <= now() - interval '2 minutes')
+        )
+        AND (
+          c.sender_account_id IS NULL
+          OR (sa.status = 'active' AND c.sender_account_id = ANY(${healthyAccountIds}::int[]))
         )
       ORDER BY ce.scheduled_at ASC
       LIMIT ${limit}
@@ -331,7 +391,7 @@ export async function claimDueEmails(limit: number): Promise<DueEmail[]> {
     FROM due
     WHERE campaign_emails.id = due.id
     RETURNING campaign_emails.id, campaign_emails.campaign_id, campaign_emails.to_email,
-      campaign_emails.subject, campaign_emails.body, campaign_emails.html
+      campaign_emails.subject, campaign_emails.body, campaign_emails.html, due.sender_account_id
   `;
   return rows.map((r) => ({
     id: r.id as string,
@@ -340,6 +400,7 @@ export async function claimDueEmails(limit: number): Promise<DueEmail[]> {
     subject: r.subject as string,
     body: r.body as string,
     html: r.html as string,
+    senderAccountId: (r.sender_account_id as number | null) ?? null,
   }));
 }
 
