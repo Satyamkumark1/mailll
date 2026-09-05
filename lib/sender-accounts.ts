@@ -1,6 +1,7 @@
 import { sql } from "./db.ts";
 import { decryptSecret, encryptSecret } from "./secret-crypto.ts";
 import { computeWarmupCap, DEFAULT_RAMP_DAYS } from "./warmup.ts";
+import { logActivity } from "./activity-log.ts";
 
 // Zoho's own documented ceiling for external sending, regardless of
 // reputation — see https://www.zoho.com/mail/help/adminconsole/rates-and-limits.html.
@@ -139,7 +140,18 @@ export async function listAccounts(): Promise<SenderAccount[]> {
   if (!seed) return [];
 
   try {
-    await createAccount(seed);
+    const created = await createAccount(seed);
+    // Only this branch actually created the row — the catch below can also
+    // land here on a conflict from a concurrent caller that got there first,
+    // and that caller's own listAccounts() call is the one that logs it.
+    await logActivity({
+      actorType: "system",
+      actorLabel: "auto-seed",
+      action: "account.created",
+      entityType: "sender_account",
+      entityId: String(created.id),
+      summary: `Auto-seeded account "${seed.label}" from legacy env vars`,
+    });
   } catch (err) {
     // Another concurrent caller (e.g. an overlapping cron tick, or a
     // request landing at the same moment) already seeded the same account

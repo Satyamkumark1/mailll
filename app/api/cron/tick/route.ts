@@ -10,6 +10,7 @@ import {
 import { listAccounts, type SenderAccount } from "@/lib/sender-accounts";
 import { peekAccountRateLimitStatus, pickLeastLoadedAccount, reserveSendSlot, type AccountLoad } from "@/lib/send-rate-limiter";
 import { sendMailDirect } from "@/lib/send-mail";
+import { logActivity } from "@/lib/activity-log";
 
 export const runtime = "nodejs";
 // Ask for the most headroom the platform allows (Hobby's default is much
@@ -51,10 +52,10 @@ async function sendOne(email: DueEmail, account: SenderAccount): Promise<Dispatc
 
   try {
     await sendMailDirect(account, { to: email.toEmail, subject: email.subject, text: email.body, html: email.html, emailId: email.id });
-    await recordEmailResult(email.id, email.campaignId, account.id, { status: "sent" });
+    await recordEmailResult(email.id, email.campaignId, account.id, email.toEmail, { status: "sent" });
     return "sent";
   } catch (err) {
-    await recordEmailResult(email.id, email.campaignId, account.id, {
+    await recordEmailResult(email.id, email.campaignId, account.id, email.toEmail, {
       status: "failed",
       error: err instanceof Error ? err.message : "Send failed",
     });
@@ -75,6 +76,13 @@ async function tick() {
     // Best-effort and self-throttling — runs even when nothing can send so
     // bounce confirmations keep flowing.
     await checkBounces();
+    await logActivity({
+      actorType: "system",
+      actorLabel: "cron-tick",
+      action: "cron.tick",
+      summary: "Tick: no healthy accounts, claimed 0, sent 0, failed 0, deferred 0",
+      metadata: { claimed: 0, sent: 0, failed: 0, deferred: 0, healthyAccounts: 0 },
+    });
     return { claimed: 0, sent: 0, failed: 0, deferred: 0 };
   }
 
@@ -136,6 +144,14 @@ async function tick() {
   // Best-effort and self-throttling (see checkBounces) — runs after the real
   // send work so a slow/unreachable IMAP server never delays actual sends.
   await checkBounces();
+
+  await logActivity({
+    actorType: "system",
+    actorLabel: "cron-tick",
+    action: "cron.tick",
+    summary: `Tick: claimed ${due.length}, sent ${summary.sent}, failed ${summary.failed}, deferred ${summary.deferred}`,
+    metadata: { claimed: due.length, ...summary, healthyAccounts: healthy.length },
+  });
 
   return { claimed: due.length, ...summary };
 }

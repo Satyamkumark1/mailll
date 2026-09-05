@@ -9,6 +9,7 @@ import {
   seedOrUpdateUser,
 } from "@/lib/auth";
 import { sql } from "@/lib/db";
+import { logActivity } from "@/lib/activity-log";
 
 export async function POST(request: Request) {
   try {
@@ -53,6 +54,14 @@ export async function POST(request: Request) {
 
     // Generate signed session token
     const token = await createSessionToken(user.id, user.email);
+
+    await logActivity({
+      actorType: "user",
+      actorUserId: user.id,
+      actorLabel: user.email,
+      action: "auth.login",
+      summary: `${user.email} logged in`,
+    });
 
     const response = NextResponse.json({
       success: true,

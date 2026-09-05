@@ -3,6 +3,8 @@ import { createCampaign, listCampaigns } from "@/lib/campaigns";
 import { getRateLimitConfig } from "@/lib/send-rate-limiter";
 import { getAccount, getEffectiveRateLimitConfig, listAccounts } from "@/lib/sender-accounts";
 import type { DraftResult, OutreachConfig } from "@/lib/store";
+import { getCurrentUser } from "@/lib/current-user";
+import { logActivity } from "@/lib/activity-log";
 
 export const runtime = "nodejs";
 
@@ -75,6 +77,17 @@ export async function POST(request: Request) {
 
   try {
     const { id, excludedCount } = await createCampaign({ drafts, config, durationHours, startAt, senderAccountId });
+    const user = await getCurrentUser();
+    await logActivity({
+      actorType: "user",
+      actorUserId: user?.userId ?? null,
+      actorLabel: user?.email ?? null,
+      action: "campaign.created",
+      entityType: "campaign",
+      entityId: id,
+      summary: `Scheduled campaign for ${drafts.length} recipient(s)`,
+      metadata: { totalCount: drafts.length, excludedCount, senderAccountId: senderAccountId ?? null },
+    });
     return Response.json({ id, excludedCount });
   } catch (err) {
     return Response.json({ error: err instanceof Error ? err.message : "Failed to schedule campaign" }, { status: 400 });

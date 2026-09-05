@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { AUTH_COOKIE_NAME, verifySessionToken } from "@/lib/auth";
 import { saveSubscription } from "@/lib/push-subscriptions";
+import { logActivity } from "@/lib/activity-log";
 
 export async function POST(request: Request) {
   try {
@@ -18,6 +19,13 @@ export async function POST(request: Request) {
     }
 
     await saveSubscription(payload.userId, { endpoint: body.endpoint, keys: body.keys });
+    await logActivity({
+      actorType: "user",
+      actorUserId: payload.userId,
+      actorLabel: payload.email,
+      action: "push.subscribed",
+      summary: `${payload.email} enabled push notifications`,
+    });
     return NextResponse.json({ success: true });
   } catch (error) {
     console.error("Push subscribe error:", error);
