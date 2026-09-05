@@ -192,3 +192,30 @@ CREATE TABLE IF NOT EXISTS push_subscriptions (
   auth TEXT NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Append-only audit trail of every user action, background/system event, and
+-- recipient-triggered event (lib/activity-log.ts). Not an entity table like
+-- campaigns/users (UUID PK) — modeled after send_attempts (the existing
+-- append-only per-attempt log), but unlike send_attempts, rows here are read
+-- back individually via cursor pagination (the Activity Log page and
+-- GET /api/activity-log), so a real per-row identity is required. BIGSERIAL
+-- (not UUID) is cheap and strictly monotonic, so id order == creation order —
+-- no separate created_at index needed for ORDER BY id DESC / WHERE id < cursor.
+CREATE TABLE IF NOT EXISTS activity_log (
+  id BIGSERIAL PRIMARY KEY,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  actor_type TEXT NOT NULL, -- 'user' | 'system' | 'recipient'
+  actor_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+  actor_label TEXT, -- denormalized: the user's email, or a fixed source tag
+                     -- ('cron-tick' | 'bounce-checker' | 'auto-seed'), or a
+                     -- recipient's email — stays readable even if
+                     -- actor_user_id's row is later deleted.
+  action TEXT NOT NULL, -- dot-namespaced, e.g. 'campaign.created'
+  entity_type TEXT, -- 'campaign' | 'campaign_email' | 'sender_account' | null
+  entity_id TEXT, -- polymorphic (campaigns/campaign_emails are UUID,
+                   -- sender_accounts are INT) — stored as TEXT, same
+                   -- rationale as send_attempts.source being a free-text tag.
+  summary TEXT NOT NULL, -- human-readable one-liner for the UI
+  metadata JSONB
+);
+CREATE INDEX IF NOT EXISTS activity_log_action_idx ON activity_log (action);

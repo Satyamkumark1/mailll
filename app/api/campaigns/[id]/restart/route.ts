@@ -1,6 +1,8 @@
 import { computeMinDurationHours, formatDurationHours } from "@/lib/campaign-schedule";
 import { getCampaign, restartCampaign } from "@/lib/campaigns";
 import { getRateLimitConfig } from "@/lib/send-rate-limiter";
+import { getCurrentUser } from "@/lib/current-user";
+import { logActivity } from "@/lib/activity-log";
 
 export const runtime = "nodejs";
 
@@ -41,5 +43,15 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   }
 
   await restartCampaign(id, durationHours);
+  const user = await getCurrentUser();
+  await logActivity({
+    actorType: "user",
+    actorUserId: user?.userId ?? null,
+    actorLabel: user?.email ?? null,
+    action: "campaign.restarted",
+    entityType: "campaign",
+    entityId: id,
+    summary: `Restarted campaign (${remaining} email(s) rescheduled)`,
+  });
   return Response.json({ success: true });
 }

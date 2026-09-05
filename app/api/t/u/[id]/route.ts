@@ -1,4 +1,5 @@
 import { sql } from "@/lib/db";
+import { logActivity } from "@/lib/activity-log";
 
 export const runtime = "nodejs";
 
@@ -13,6 +14,14 @@ async function unsubscribe(id: string): Promise<void> {
   const email = (row.to_email as string).toLowerCase();
   await sql`INSERT INTO suppressed_emails (email, reason) VALUES (${email}, 'unsubscribe') ON CONFLICT (email) DO NOTHING`;
   await sql`UPDATE campaign_emails SET unsubscribed_at = now() WHERE id = ${id}`;
+  await logActivity({
+    actorType: "recipient",
+    actorLabel: email,
+    action: "email.unsubscribed",
+    entityType: "campaign_email",
+    entityId: id,
+    summary: `${email} unsubscribed`,
+  });
 }
 
 function unsubscribeFailureResponse(): Response {

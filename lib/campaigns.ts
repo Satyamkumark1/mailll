@@ -4,6 +4,7 @@ import { computeScheduledTimes } from "./campaign-schedule.ts";
 import { buildEmailHtml, LOGO_CID } from "./email-signature.ts";
 import { MAX_CONSECUTIVE_SEND_FAILURES, type DraftResult, type OutreachConfig } from "./store.ts";
 import { notifySendStarted, notifyAccountPaused } from "./push-notifier.ts";
+import { logActivity } from "./activity-log.ts";
 
 export type CampaignStatus = "running" | "completed" | "canceled";
 export type CampaignEmailStatus = "pending" | "sending" | "sent" | "failed" | "canceled" | "skipped";
@@ -245,15 +246,17 @@ export async function getCampaign(id: string): Promise<CampaignSummary | null> {
   };
 }
 
-export async function cancelCampaign(id: string): Promise<void> {
-  await sql`
+export async function cancelCampaign(id: string): Promise<number> {
+  const canceled = await sql`
     UPDATE campaign_emails SET status = 'canceled'
     WHERE campaign_id = ${id} AND status = 'pending'
+    RETURNING id
   `;
   await sql`
     UPDATE campaigns SET status = 'canceled'
     WHERE id = ${id} AND status = 'running'
   `;
+  return canceled.length;
 }
 
 // Distinct from account-level pause/resume (lib/sender-accounts.ts): cancelCampaign() already flipped this
@@ -422,6 +425,7 @@ export async function recordEmailResult(
   id: string,
   campaignId: string,
   accountId: number,
+  toEmail: string,
   result: { status: "sent"; } | { status: "failed"; error: string }
 ): Promise<void> {
   if (result.status === "sent") {
@@ -432,6 +436,15 @@ export async function recordEmailResult(
       RETURNING sent_count
     `;
     await sql`UPDATE sender_accounts SET consecutive_failures = 0 WHERE id = ${accountId}`;
+    await logActivity({
+      actorType: "system",
+      actorLabel: "cron-tick",
+      action: "send.sent",
+      entityType: "campaign_email",
+      entityId: id,
+      summary: `Sent to ${toEmail}`,
+      metadata: { campaignId, accountId },
+    });
     // Postgres serializes concurrent updates to the same row, so exactly one
     // caller ever observes sent_count transition to 1 — that's this
     // campaign's first successful send, worth a "sending started" push.
@@ -446,17 +459,33 @@ export async function recordEmailResult(
       WHERE id = ${accountId}
       RETURNING consecutive_failures
     `;
+    await logActivity({
+      actorType: "system",
+      actorLabel: "cron-tick",
+      action: "send.failed",
+      entityType: "campaign_email",
+      entityId: id,
+      summary: `Send to ${toEmail} failed: ${result.error}`,
+      metadata: { campaignId, accountId },
+    });
     if (account && shouldPauseAccount(account.consecutive_failures as number)) {
       const [paused] = await sql`
         UPDATE sender_accounts
         SET status = 'paused'
         WHERE id = ${accountId} AND status = 'active'
         RETURNING label, smtp_user
-        RETURNING label, smtp_user
       `;
       if (paused) {
         const label = (paused.label as string | null) || (paused.smtp_user as string);
         await notifyAccountPaused(label).catch((err) => console.error("notifyAccountPaused failed:", err));
+        await logActivity({
+          actorType: "system",
+          actorLabel: "cron-tick",
+          action: "account.autopaused",
+          entityType: "sender_account",
+          entityId: String(accountId),
+          summary: `Auto-paused "${label}" after repeated send failures`,
+        });
       }
     }
   }

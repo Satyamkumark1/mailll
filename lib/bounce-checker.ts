@@ -2,6 +2,7 @@ import { ImapFlow } from "imapflow";
 import { simpleParser } from "mailparser";
 import { sql } from "./db.ts";
 import { getDecryptedSmtpPassword, listAccounts, type SenderAccount } from "./sender-accounts.ts";
+import { logActivity } from "./activity-log.ts";
 
 // Check IMAP every 1 minute when sent emails are pending delivery confirmation
 // so bounce-back DSN notifications are detected promptly during active sends.
@@ -85,6 +86,20 @@ async function processMessage(source: Buffer): Promise<void> {
 
   const reason = extractDiagnostic(dsnText) ?? subject.slice(0, 300) ?? null;
   const bounceType = classifyBounceType(dsnText);
+
+  // Logged here, before the atomic UPDATE/INSERT below, so that query's shape
+  // (just made atomic — see its own comment) isn't touched. Means this fires
+  // whenever a message parses as a DSN, even the rare case it doesn't match
+  // any unconfirmed 'sent' row below — a deliberate trade against re-touching
+  // that statement.
+  await logActivity({
+    actorType: "system",
+    actorLabel: "bounce-checker",
+    action: "bounce.detected",
+    entityType: "campaign_email",
+    summary: `Bounce (${bounceType}) for ${recipient}: ${reason ?? "no reason given"}`,
+    metadata: { recipient, bounceType, reason },
+  });
 
   // The status update and the (hard-bounce-only) suppression insert are one
   // statement, not two — the Neon HTTP driver has no interactive transactions
@@ -189,6 +204,14 @@ async function checkBouncesForAccount(account: SenderAccount): Promise<void> {
     if ((pendingConfirmation as number) === 0 && account.lastBounceCheckAt) return;
 
     await pollInbox(account);
+    await logActivity({
+      actorType: "system",
+      actorLabel: "bounce-checker",
+      action: "bounce.check_run",
+      entityType: "sender_account",
+      entityId: String(account.id),
+      summary: `Checked "${account.label}" for bounces`,
+    });
   } catch (err) {
     // Best-effort — IMAP misconfiguration on one account must never take
     // down bounce checking for the others, or the send cron itself.

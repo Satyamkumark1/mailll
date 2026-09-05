@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { AUTH_COOKIE_NAME, verifySessionToken } from "@/lib/auth";
 import { deleteSubscriptionByEndpoint } from "@/lib/push-subscriptions";
+import { logActivity } from "@/lib/activity-log";
 
 export async function POST(request: Request) {
   try {
@@ -18,6 +19,13 @@ export async function POST(request: Request) {
     }
 
     await deleteSubscriptionByEndpoint(body.endpoint);
+    await logActivity({
+      actorType: "user",
+      actorUserId: payload.userId,
+      actorLabel: payload.email,
+      action: "push.unsubscribed",
+      summary: `${payload.email} disabled push notifications`,
+    });
     return NextResponse.json({ success: true });
   } catch (error) {
     console.error("Push unsubscribe error:", error);

@@ -146,7 +146,7 @@ export default function ValidatorLayout({ children }: { children: React.ReactNod
   // data that stage needs) bounces back to Upload — the same rule that
   // grayed out its tab button, now also enforced against direct URL entry.
   useEffect(() => {
-    if (segment && !tabEnabled(segment)) {
+    if (segment && TABS.some((t) => t.id === segment) && !tabEnabled(segment)) {
       router.replace("/validator/upload");
     }
   }, [segment, tabEnabled, router]);
@@ -434,6 +434,20 @@ export default function ValidatorLayout({ children }: { children: React.ReactNod
                   <Icon name={pushState === "subscribed" ? "notifications_active" : "notifications"} className="text-[18px]" />
                 </button>
               )}
+
+              <Link
+                href="/validator/activity-log"
+                title="Activity log"
+                onNavigate={(e) => {
+                  if (guardedAction) {
+                    e.preventDefault();
+                    guardedAction("go to Activity log", () => router.push("/validator/activity-log"));
+                  }
+                }}
+                className="flex h-9 w-9 items-center justify-center rounded-lg border border-outline bg-surface-container-low text-on-surface-variant transition-all hover:bg-surface-container hover:text-primary active:scale-95 cursor-pointer shadow-sm"
+              >
+                <Icon name="list_alt" className="text-[18px]" />
+              </Link>
 
               <button
                 onClick={openSettings}
